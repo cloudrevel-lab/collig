@@ -1,0 +1,1 @@
+print("Hello from Collig generated script!")
