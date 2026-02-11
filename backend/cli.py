@@ -39,6 +39,8 @@ class SkillCommandCompleter(Completer):
             ("backup", "Backup user data to a zip file"),
             ("restore", "Restore user data from a zip file"),
             ("provider", "Switch LLM provider (openai/llama)"),
+            ("run", "Run a shell command (e.g., /run ls -la)"),
+            ("restart", "Restart the session (reload code)"),
             ("exit", "Exit the application"),
             ("quit", "Exit the application"),
             ("clear", "Clear the screen")
@@ -187,6 +189,16 @@ def handle_config_command(command_parts, agent=None):
         save_config(config)
         console.print(f"[green]Configuration updated:[/green] {key} = {value}")
 
+        # If setting an API key, also update .env and os.environ
+        if key.endswith("_API_KEY"):
+            env_file = ".env"
+            if not os.path.exists(env_file):
+                with open(env_file, "w") as f:
+                    f.write("")
+            set_key(env_file, key, value)
+            os.environ[key] = value
+            console.print(f"[green]Environment variable {key} updated.[/green]")
+
         # Reload agent with new config?
         # Ideally, we should restart or trigger a reload, but for now user might need to restart.
         console.print("[dim]Note: You may need to restart the session for changes to take effect in some skills.[/dim]")
@@ -302,6 +314,59 @@ def main():
                 console.clear()
                 continue
 
+            if user_input.startswith("run"):
+                # Handle shell execution
+                cmd_parts = user_input.split(" ", 1)
+                if len(cmd_parts) < 2:
+                    console.print("Usage: /run [command] [args...]")
+                else:
+                    cmd_to_run = cmd_parts[1]
+                    import subprocess
+                    try:
+                        console.print(f"[dim]Running: {cmd_to_run}[/dim]")
+                        # Run command and stream output
+                        process = subprocess.Popen(
+                            cmd_to_run,
+                            shell=True,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            text=True
+                        )
+                        stdout, stderr = process.communicate()
+
+                        if stdout:
+                            console.print(stdout.rstrip())
+                        if stderr:
+                            console.print(f"[red]{stderr.rstrip()}[/red]")
+
+                    except Exception as e:
+                        console.print(f"[bold red]Error running command:[/bold red] {e}")
+                continue
+
+            if user_input.lower() == "restart":
+                # Restart the application with the same session ID
+                console.print(Panel(
+                    f"[bold cyan]Restarting session {session_id}...[/bold cyan]",
+                    title="Restarting",
+                    border_style="yellow"
+                ))
+                # Use os.execv to replace the current process
+                # We need to reconstruct the command line arguments
+                # The original command was likely "make pa session=..." or "python backend/cli.py ..."
+                # We want to run: python backend/cli.py --session <session_id>
+
+                # Get the python interpreter
+                python = sys.executable
+
+                # Get the script path
+                script = os.path.abspath(__file__)
+
+                # New arguments
+                args_list = [python, script, "--session", session_id]
+
+                # Execute
+                os.execv(python, args_list)
+
             if user_input.startswith("backup"):
                 handle_backup_command()
                 continue
@@ -314,11 +379,10 @@ def main():
                 parts = user_input.split()
                 if len(parts) < 2:
                     console.print(f"[bold]Current Provider:[/bold] {agent.llm_provider} (Model: {agent.llm_model})")
-                    console.print("Usage: /provider [list|openai|llama] [model_name (optional)]")
+                    console.print("Usage: /provider [list|openai|llama|deepseek] [model_name (optional)]")
                 elif parts[1].lower() == "list":
-                    console.print("[bold]Available Providers:[/bold]")
-                    console.print("- [cyan]openai[/cyan] (Models: gpt-4o, gpt-3.5-turbo, etc.)")
-                    console.print("- [cyan]llama[/cyan]  (Models: llama3, mistral, etc. via Ollama)")
+                    console.print("[bold]Available Providers & Models:[/bold]")
+                    console.print(agent.get_available_models())
                     console.print(f"\n[bold]Current:[/bold] {agent.llm_provider} (Model: {agent.llm_model})")
                 else:
                     provider = parts[1]

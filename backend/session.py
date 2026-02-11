@@ -66,3 +66,10 @@ class SessionManager:
         """Returns the message history for a session."""
         session = self.load_session(session_id)
         return session.get("messages", []) if session else []
+
+    def clear_history(self, session_id: str):
+        """Clears the message history for a session."""
+        session = self.load_session(session_id)
+        if session:
+            session["messages"] = []
+            self.save_session(session_id, session)
