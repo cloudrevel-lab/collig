@@ -1,7 +1,7 @@
 from typing import List, Dict, Any
 from langchain_core.tools import tool
 from ddgs import DDGS
-from .base import Skill
+from ..base import Skill
 
 class NewsSkill(Skill):
     # Use class-level cache to ensure persistence across tool calls/copies

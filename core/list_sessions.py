@@ -1,11 +1,17 @@
 import os
+import sys
+
+# Add parent directory to sys.path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 import json
 from rich.console import Console
 from rich.table import Table
 from datetime import datetime
+from core.paths import paths
 
-# Define sessions directory relative to this script
-SESSIONS_DIR = "sessions"
+# Define sessions directory
+SESSIONS_DIR = paths.sessions_dir
 
 console = Console()
 

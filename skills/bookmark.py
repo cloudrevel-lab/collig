@@ -3,6 +3,7 @@ import os
 import datetime
 from langchain_core.tools import tool, BaseTool
 from .base import Skill
+from core.paths import paths
 
 try:
     from langchain_openai import OpenAIEmbeddings
@@ -16,11 +17,12 @@ class BookmarkSkill(Skill):
     def __init__(self):
         super().__init__()
         self.vectorstore = None
-        self.persist_directory = os.path.join(os.getcwd(), "data", "bookmarks_db")
+        # Use centralized data directory
+        self.persist_directory = paths.get_skill_data_dir("bookmarks")
         self.last_retrieved_ids = [] # To store IDs of listed bookmarks for deletion by index
 
         # Ensure data directory exists
-        os.makedirs(self.persist_directory, exist_ok=True)
+        # os.makedirs(self.persist_directory, exist_ok=True) # Handled by paths
 
         self._initialize_store()
 

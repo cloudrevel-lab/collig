@@ -15,4 +15,4 @@ backend/data/bookmarks_db/
 *.bin
 *.sqlite3
 *.zip
-backend/config.json
+core/config.json

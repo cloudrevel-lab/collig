@@ -3,11 +3,13 @@ import os
 import uuid
 from typing import List, Dict, Optional
 from datetime import datetime
+from core.paths import paths
 
 class SessionManager:
-    def __init__(self, sessions_dir: str = "sessions"):
-        self.sessions_dir = sessions_dir
-        os.makedirs(self.sessions_dir, exist_ok=True)
+    def __init__(self):
+        # Use paths.sessions_dir instead of hardcoded "sessions"
+        self.sessions_dir = paths.sessions_dir
+        # os.makedirs(self.sessions_dir, exist_ok=True) # Already done in paths.py
 
     def _get_session_path(self, session_id: str) -> str:
         return os.path.join(self.sessions_dir, f"{session_id}.json")

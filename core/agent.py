@@ -1,4 +1,5 @@
 import os
+from typing import List, Dict, Any, Optional
 from skills.manager import SkillManager
 from skills.builtins import TimeSkill, BrowserSkill
 from skills.filesystem import FileSystemSkill
@@ -16,6 +17,7 @@ from skills.news import NewsSkill
 from skills.profile import ProfileSkill
 from skills.git import GitSkill
 from session import SessionManager
+from paths import paths
 
 from langchain_openai import ChatOpenAI
 from langchain_ollama import ChatOllama
@@ -35,7 +37,7 @@ class Agent:
         # Config.json takes precedence for user preference
         import json
         try:
-            with open("config.json", "r") as f:
+            with open(paths.global_config_file, "r") as f:
                 config = json.load(f)
                 self.llm_provider = config.get("LLM_PROVIDER", os.getenv("LLM_PROVIDER", "openai"))
                 self.llm_model = config.get("LLM_MODEL", os.getenv("LLM_MODEL", "gpt-4o"))
@@ -104,8 +106,8 @@ class Agent:
         self.skill_manager.register_skill(BrowserSkill())
         self.skill_manager.register_skill(WeatherSkill())
         self.skill_manager.register_skill(FileSystemSkill())
+        self.skill_manager.register_skill(EmailSkill())
         # self.skill_manager.register_skill(ProgrammingSkill())
-        # self.skill_manager.register_skill(EmailSkill())
         # self.skill_manager.register_skill(SetupWizardSkill())
         # self.skill_manager.register_skill(MapSkill())
         self.skill_manager.register_skill(SystemSkill())
@@ -128,7 +130,7 @@ class Agent:
                 # Try loading from config.json
                 import json
                 try:
-                    with open("config.json", "r") as f:
+                    with open(paths.global_config_file, "r") as f:
                         config = json.load(f)
                         key = config.get(env_var_name)
                 except Exception:
@@ -197,7 +199,108 @@ class Agent:
             self.skill_manager.register_skill(skill)
 
 
-    def process_message(self, message: str, session_id: str = None) -> dict:
+    def _compress_history(self, history: List[Dict], current_message: str) -> List[Any]:
+        """
+        Compresses conversation history by summarizing older messages
+        and keeping recent ones intact.
+        Uses a sliding window approach based on estimated token count to prevent context length errors.
+        """
+        if not history:
+            return []
+
+        # Configuration for compression
+        RAW_CONTEXT_COUNT = 3
+        MAX_SUMMARY_TOKENS = 6000 # Rough estimate (chars / 4) to stay well within limits
+
+        # Helper to convert dict to LangChain message
+        def to_lc_msg(msg):
+            if msg["role"] == "user":
+                return HumanMessage(content=msg["content"])
+            elif msg["role"] == "ai":
+                return AIMessage(content=msg["content"])
+            return None
+
+        # 1. Simple Case: History is short enough
+        if len(history) <= RAW_CONTEXT_COUNT:
+            return [to_lc_msg(m) for m in history if to_lc_msg(m)]
+
+        # 2. Prepare data for summarization
+        recent_raw = history[-RAW_CONTEXT_COUNT:]
+
+        # We need to be careful about the "to_summarize" part.
+        # If it's too huge, the summarization call itself will fail (as seen in the error).
+        # So we must truncate 'to_summarize' to a safe limit BEFORE asking the LLM to summarize it.
+
+        to_summarize_candidates = history[:-RAW_CONTEXT_COUNT]
+
+        # Estimate token count for candidates (1 token ~= 4 chars)
+        current_tokens = 0
+        safe_to_summarize = []
+
+        # Iterate backwards to keep the most recent "old" messages
+        for msg in reversed(to_summarize_candidates):
+            msg_len = len(msg.get("content", ""))
+            est_tokens = msg_len / 4
+            if current_tokens + est_tokens > MAX_SUMMARY_TOKENS:
+                break
+            safe_to_summarize.insert(0, msg)
+            current_tokens += est_tokens
+
+        # If we dropped messages, we might want to note that?
+        # For now, just silently drop extremely old history that doesn't fit in the summary window.
+
+        # Create a prompt for summarization
+        summary_prompt = "Summarize the following conversation history, focusing on key facts and user preferences that might be relevant to the new user request: '{}'. Ignore irrelevant details like casual chatter or completed tool outputs unless they provide necessary context.\n\nHistory:\n".format(current_message)
+
+        for msg in safe_to_summarize:
+            summary_prompt += f"{msg['role'].upper()}: {msg['content']}\n"
+
+        try:
+            from langchain_core.messages import SystemMessage
+            from langchain_openai import ChatOpenAI
+            from langchain_ollama import ChatOllama
+
+            llm = None
+            if self.llm_provider == "openai":
+                api_key = os.getenv("OPENAI_API_KEY")
+                if api_key:
+                    llm = ChatOpenAI(model="gpt-3.5-turbo", api_key=api_key)
+            elif self.llm_provider == "llama":
+                llm = ChatOllama(model=self.llm_model)
+            elif self.llm_provider == "deepseek":
+                api_key = os.getenv("DEEPSEEK_API_KEY")
+                if api_key:
+                    llm = ChatOpenAI(model="deepseek-chat", base_url="https://api.deepseek.com", api_key=api_key)
+
+            if llm:
+                summary_response = llm.invoke(summary_prompt)
+                summary = summary_response.content
+
+                # Construct result
+                compressed_msgs = []
+                compressed_msgs.append(SystemMessage(content=f"Previous Conversation Summary: {summary}"))
+
+                for msg in recent_raw:
+                    lc_msg = to_lc_msg(msg)
+                    if lc_msg:
+                        compressed_msgs.append(lc_msg)
+
+                return compressed_msgs
+
+        except Exception as e:
+            print(f"Warning: History compression failed ({e}). Falling back to truncation.")
+
+        # Fallback: Just return last N messages
+        fallback_msgs = []
+        # Keep last 5 if compression fails (safer than 10 given the error)
+        for msg in history[-5:]:
+            lc_msg = to_lc_msg(msg)
+            if lc_msg:
+                fallback_msgs.append(lc_msg)
+        return fallback_msgs
+
+
+    def process_message(self, message: str, session_id: str = None, include_history: bool = True, verbose: bool = True) -> dict:
         """
         Process a user message, optionally within a session context.
         """
@@ -217,22 +320,13 @@ class Agent:
             if session_id:
                 msgs.append(SystemMessage(content=f"Current Session ID: {session_id}"))
 
-                # Load history
-                history = self.session_manager.get_history(session_id)
+                if include_history:
+                    # Load history
+                    history = self.session_manager.get_history(session_id)
 
-                # Truncate history to avoid rate limits (e.g., keep last 10 messages)
-                MAX_HISTORY = 10
-                history_subset = history[:-1] # Exclude the current user message
-                if len(history_subset) > MAX_HISTORY:
-                     history_subset = history_subset[-MAX_HISTORY:]
-
-                for msg in history_subset:
-                    role = msg["role"]
-                    content = msg["content"]
-                    if role == "user":
-                        msgs.append(HumanMessage(content=content))
-                    elif role == "ai":
-                        msgs.append(AIMessage(content=content))
+                    # Use compression
+                    compressed_history = self._compress_history(history, message)
+                    msgs.extend(compressed_history)
 
             msgs.append(HumanMessage(content=message))
 
@@ -270,18 +364,40 @@ class Agent:
                                      should_print = True
 
                                 # Print header if needed
-                                if should_print and not has_printed_header:
+                                if verbose and should_print and not has_printed_header:
                                     print("\n[Thinking Process]")
                                     has_printed_header = True
 
                                 # Do the printing
-                                if msg.content and msg.tool_calls:
-                                    print(f"  ➜ Reasoning: {msg.content}")
+                                if verbose and should_print:
+                                    if msg.content and msg.tool_calls:
+                                        print(f"  ➜ Reasoning: {msg.content}")
 
-                                if msg.tool_calls:
-                                    for tc in msg.tool_calls:
-                                        print(f"  ➜ Planning to use tool: \033[1m{tc['name']}\033[0m")
-                                        print(f"    Args: {tc['args']}")
+                                    if msg.tool_calls:
+                                        import json
+                                        for tc in msg.tool_calls:
+                                            print(f"  ➜ Planning to use tool: \033[1m{tc['name']}\033[0m")
+
+                                            # Pretty print arguments
+                                            args = tc.get('args', {})
+                                            if args:
+                                                # Mask sensitive data
+                                                safe_args = args.copy() if isinstance(args, dict) else args
+                                                if isinstance(safe_args, dict):
+                                                    for k in safe_args:
+                                                        if any(secret in k.lower() for secret in ['password', 'secret', 'key', 'token', 'credential']):
+                                                            safe_args[k] = "******"
+
+                                                try:
+                                                    # If it's a dict, dump it as formatted JSON
+                                                    pretty_args = json.dumps(safe_args, indent=2)
+                                                    # Indent the whole block to align
+                                                    indented_args = "\n".join("    " + line for line in pretty_args.splitlines())
+                                                    print(f"    Args:\n{indented_args}")
+                                                except:
+                                                    print(f"    Args: {safe_args}")
+                                            else:
+                                                print(f"    Args: {{}}")
 
                                 # Capture final response if it's the answer (no tool calls)
                                 if msg.content and not msg.tool_calls:
@@ -291,16 +407,17 @@ class Agent:
                         if "messages" in value:
                             msg = value["messages"][-1]
 
-                            if not has_printed_header:
+                            if verbose and not has_printed_header:
                                 print("\n[Thinking Process]")
                                 has_printed_header = True
 
-                            print(f"    ✔ Tool '{msg.name}' executed.")
+                            if verbose:
+                                print(f"    ✔ Tool '{msg.name}' executed.")
 
                 # Keep track of the last event as the final state
                 final_state = event
 
-            if has_printed_header:
+            if verbose and has_printed_header:
                 print("[End of Thinking]\n")
 
             # Extract the final response from the last state

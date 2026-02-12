@@ -1,5 +1,9 @@
 import os
 import sys
+
+# Add parent directory to sys.path to allow importing 'skills' from sibling directory
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 import argparse
 import json
 import zipfile
@@ -10,6 +14,7 @@ from rich.prompt import Prompt as RichPrompt, Confirm
 from rich.markdown import Markdown
 from rich.panel import Panel
 from dotenv import load_dotenv, set_key
+from core.paths import paths
 
 # Import prompt_toolkit for advanced input handling
 from prompt_toolkit import PromptSession
@@ -39,6 +44,8 @@ class SkillCommandCompleter(Completer):
             ("backup", "Backup user data to a zip file"),
             ("restore", "Restore user data from a zip file"),
             ("provider", "Switch LLM provider (openai/llama)"),
+            ("doctor", "Check system health and LLM connection"),
+            ("test", "Alias for doctor"),
             ("run", "Run a shell command (e.g., /run ls -la)"),
             ("restart", "Restart the session (reload code)"),
             ("exit", "Exit the application"),
@@ -70,34 +77,42 @@ load_dotenv()
 
 console = Console()
 
-CONFIG_FILE = "config.json"
+# Use paths.global_config_file instead of local config.json
+CONFIG_FILE = paths.global_config_file
+
+def load_config():
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, "r") as f:
+            return json.load(f)
+    return {}
+
+def save_config(config):
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(config, f, indent=2)
 
 def handle_backup_command():
     """Backs up user data to a zip file."""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_filename = f"collig_backup_{timestamp}.zip"
 
-    files_to_backup = ["config.json", ".env"]
-    dirs_to_backup = ["sessions", "data"]
+    # Backup from ~/.collig
+    # But wait, the user might expect the zip to be in the current working directory.
+    # We should zip the contents of ~/.collig
 
-    console.print(f"[bold]Backing up data to {output_filename}...[/bold]")
+    source_dir = paths.home
+
+    console.print(f"[bold]Backing up data from {source_dir} to {output_filename}...[/bold]")
 
     try:
         with zipfile.ZipFile(output_filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            count = 0
-            for file in files_to_backup:
-                if os.path.exists(file):
-                    zipf.write(file)
-                    count += 1
+            for root, dirs, files in os.walk(source_dir):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    # Archive path relative to source_dir
+                    arcname = os.path.relpath(file_path, source_dir)
+                    zipf.write(file_path, arcname)
 
-            for directory in dirs_to_backup:
-                if os.path.exists(directory):
-                    for root, dirs, files in os.walk(directory):
-                        for file in files:
-                            file_path = os.path.join(root, file)
-                            zipf.write(file_path)
-                            count += 1
-        console.print(f"[green]Backup successful! {count} files saved to {output_filename}[/green]")
+        console.print(f"[green]Backup successful! Saved to {output_filename}[/green]")
     except Exception as e:
         console.print(f"[bold red]Backup failed:[/bold red] {e}")
 
@@ -207,7 +222,17 @@ def handle_config_command(command_parts, agent=None):
 
 def check_setup():
     """Checks if the environment is set up (e.g., API keys exist)."""
-    return os.getenv("OPENAI_API_KEY") is not None
+    # 1. Check environment variable
+    if os.getenv("OPENAI_API_KEY"):
+        return True
+
+    # 2. Check config file
+    config = load_config()
+    if config.get("OPENAI_API_KEY"):
+        os.environ["OPENAI_API_KEY"] = config["OPENAI_API_KEY"]
+        return True
+
+    return False
 
 def run_setup_wizard():
     """Runs the first-time setup wizard."""
@@ -396,6 +421,68 @@ def main():
                     config["LLM_MODEL"] = agent.llm_model
                     save_config(config)
                     console.print("[dim]Preference saved to config.json[/dim]")
+                continue
+
+            if user_input.startswith("doctor") or user_input.startswith("test"):
+                console.print(Panel(f"[bold]System Doctor[/bold]\nChecking connection to {agent.llm_provider}...", title="Health Check"))
+
+                # Check 1: Provider Config
+                console.print(f"• Provider: [cyan]{agent.llm_provider}[/cyan]")
+                console.print(f"• Model: [cyan]{agent.llm_model}[/cyan]")
+
+                # Check 2: API Key / Connection
+                status = "[green]OK[/green]"
+                error_msg = ""
+
+                if agent.llm_provider == "openai":
+                    if not os.getenv("OPENAI_API_KEY"):
+                        status = "[red]MISSING API KEY[/red]"
+                        error_msg = "Please set OPENAI_API_KEY in .env or via '/config set'"
+                elif agent.llm_provider == "deepseek":
+                    if not os.getenv("DEEPSEEK_API_KEY"):
+                        status = "[red]MISSING API KEY[/red]"
+                        error_msg = "Please set DEEPSEEK_API_KEY in .env or via '/config set'"
+                elif agent.llm_provider == "llama":
+                    # Check if ollama is running
+                    import subprocess
+                    try:
+                        subprocess.run(["ollama", "--version"], capture_output=True, check=True)
+                    except:
+                        status = "[red]OLLAMA NOT FOUND[/red]"
+                        error_msg = "Ensure Ollama is installed and running."
+
+                console.print(f"• Configuration: {status}")
+                if error_msg:
+                    console.print(f"  ➜ {error_msg}")
+
+                # Check 3: Live LLM Request
+                if "OK" in status:
+                    console.print("• LLM Connection: [yellow]Testing...[/yellow]", end="\r")
+                    try:
+                        # Create a simple direct invocation bypassing the agent loop for speed
+                        if hasattr(agent, "agent_executor"):
+                            # Using invoke directly on the LLM object inside the agent would be cleaner
+                            # but agent.agent_executor is a compiled graph.
+                            # Let's just ask a simple hello via process_message but silent
+                            test_msg = "what is 2+2"
+
+                            # We can use the agent's LLM directly if we can access it,
+                            # but agent doesn't expose 'llm' publicly in the class def above.
+                            # So we go through process_message.
+                            # print("Send test message:", test_msg)
+                            result = agent.process_message(test_msg, include_history=False, verbose=False)
+                            # print(">>>result", result)
+                            resp = result.get("response", "").strip()
+                            # Check for any non-empty response
+                            if resp:
+                                console.print("• LLM Connection: [green]OK[/green] (Response received)")
+                            else:
+                                console.print(f"• LLM Connection: [yellow]WARNING[/yellow] (Empty response)")
+                        else:
+                             console.print("• LLM Connection: [red]FAILED[/red] (Agent not initialized)")
+                    except Exception as e:
+                        console.print(f"• LLM Connection: [red]FAILED[/red] ({e})")
+
                 continue
 
             if user_input.startswith("config"):

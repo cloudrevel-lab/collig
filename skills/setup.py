@@ -3,6 +3,8 @@ import json
 import os
 from .base import Skill
 
+from core.paths import paths
+
 class SetupWizardSkill(Skill):
     def __init__(self):
         super().__init__()
@@ -21,14 +23,14 @@ class SetupWizardSkill(Skill):
         return ["setup", "guide", "help me config", "help me auth", "wizard", "configure"]
 
     def load_config(self):
-        config_file = "config.json"
+        config_file = paths.global_config_file
         if os.path.exists(config_file):
             with open(config_file, "r") as f:
                 return json.load(f)
         return {}
 
     def save_config(self, config):
-        with open("config.json", "w") as f:
+        with open(paths.global_config_file, "w") as f:
             json.dump(config, f, indent=2)
 
     def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
