@@ -97,7 +97,10 @@ class ProfileSkill(Skill):
             }
             
             # Content is structured for semantic search
-            content = f"{key}: {value}\nCategory: {category}"
+            # Crucially, we must include the value in a way that retrieval for "wife's name" works.
+            # If key is "wife" and value is "Xueqing Pan", content "wife: Xueqing Pan" works.
+            # But if key is obscure, it might fail.
+            content = f"User's {key} is {value}. (Category: {category})"
             
             self.vectorstore.add_documents([Document(page_content=content, metadata=meta)])
             return f"✅ Personal info updated: {key} = {value}"
@@ -115,19 +118,17 @@ class ProfileSkill(Skill):
 
             try:
                 # Similarity search
-                docs = self.vectorstore.similarity_search(query, k=3)
+                # Increase k to catch more context if multiple attributes match "wife"
+                docs = self.vectorstore.similarity_search(query, k=5)
                 if not docs:
                     return f"I don't have any information about '{query}' in your profile."
                 
                 results = []
                 for doc in docs:
-                    key = doc.metadata.get("key", "unknown")
-                    # Parse value from content or store in metadata? 
-                    # We stored it as "key: value" in content.
-                    # Let's just return the content.
+                    # Return the full sentence we stored
                     results.append(doc.page_content)
                 
-                return "Here is what I found in your profile:\n" + "\n---\n".join(results)
+                return "Here is what I found in your profile:\n" + "\n".join(results)
 
             except Exception as e:
                 return f"Error retrieving personal info: {e}"
