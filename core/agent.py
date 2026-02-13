@@ -16,8 +16,9 @@ from skills.bookmark import BookmarkSkill
 from skills.news import NewsSkill
 from skills.profile import ProfileSkill
 from skills.git import GitSkill
-from session import SessionManager
-from paths import paths
+from skills.date_calculator import DateCalculatorSkill
+from core.session import SessionManager
+from core.paths import paths
 
 from langchain_openai import ChatOpenAI
 from langchain_ollama import ChatOllama
@@ -116,6 +117,7 @@ class Agent:
         self.skill_manager.register_skill(NewsSkill())
         self.skill_manager.register_skill(ProfileSkill())
         self.skill_manager.register_skill(GitSkill())
+        self.skill_manager.register_skill(DateCalculatorSkill())
         # self.skill_manager.register_skill(ChatSkill()) # Fallback / General Skill
 
     def _init_langchain_agent(self):
@@ -317,6 +319,13 @@ class Agent:
             # We inject the session ID into the system message context by prepending a SystemMessage
 
             msgs = []
+
+            # Inject current system time as a system message to ground the model
+            # This prevents hallucination of dates based on training data cutoff
+            from datetime import datetime
+            current_time_str = datetime.now().strftime("%A, %B %d, %Y %H:%M:%S")
+            msgs.append(SystemMessage(content=f"Current System Time: {current_time_str}"))
+
             if session_id:
                 msgs.append(SystemMessage(content=f"Current Session ID: {session_id}"))
 
@@ -421,76 +430,21 @@ class Agent:
                 print("[End of Thinking]\n")
 
             # Extract the final response from the last state
-            # The stream returns chunks. We need to look at the accumulated state or the last message from the executor.
-            # Actually, stream(inputs) yields updates.
-            # To get the final message, we might need to rely on the fact that the loop finishes.
-            # But the 'event' only contains the *delta* or the *update*.
-            # It's safer to just run invoke again? No, that wastes tokens.
-            # The final_state['agent']['messages'][-1] should be the final answer IF the last step was the agent.
+            if final_state and "agent" in final_state:
+                last_msg = final_state["agent"]["messages"][-1]
+                if isinstance(last_msg, AIMessage):
+                    final_response_text = last_msg.content
+            elif final_state and "messages" in final_state:
+                 # If stream_mode="values" was used (it's not here, but for robustness)
+                 last_msg = final_state["messages"][-1]
+                 if isinstance(last_msg, AIMessage):
+                    final_response_text = last_msg.content
 
-            # Let's inspect how to get the full final state.
-            # If we use stream_mode="values", we get the full list of messages at each step.
-
-            # Re-run with stream_mode="values" to easily get the final result
-            # But wait, we can't consume the generator twice.
-            # Let's switch to stream_mode="values" for the loop above.
-            pass
-
-            # Reworking the loop for stream_mode="values"
-
-            messages = []
-            print("\n[Thinking Process]")
-            for chunk in self.agent_executor.stream(inputs, stream_mode="values"):
-                if "messages" in chunk:
-                    messages = chunk["messages"]
-                    last_msg = messages[-1]
-
-                    # If it's an AIMessage with tool_calls, print them
-                    if isinstance(last_msg, AIMessage) and last_msg.tool_calls:
-                         # We might see the same message multiple times if using "values"?
-                         # Actually "values" yields the full state.
-                         # We only want to print *new* things.
-                         # But for simplicity, let's just print the last tool call if it's new.
-                         # This is getting complicated.
-                         pass
-
-            # Let's stick to the default stream (updates) and reconstruct or just rely on the last update?
-            # Actually, the last update from 'agent' node usually contains the final response.
-            # But if the last node was 'tools', then 'agent' runs again to generate the final response.
-            # So the last event should be from 'agent' and contain the final answer.
-
-            # Let's try a hybrid approach:
-            # 1. Use default stream to print thoughts.
-            # 2. Capture the last AIMessage content.
-
-            final_response_text = ""
-            print("\n[Thinking Process]")
-            for event in self.agent_executor.stream(inputs):
-                for key, value in event.items():
-                    if key == "agent":
-                        if "messages" in value:
-                            msg = value["messages"][-1]
-                            if isinstance(msg, AIMessage):
-                                if msg.tool_calls:
-                                    for tc in msg.tool_calls:
-                                        print(f"  ➜ Planning to use tool: \033[1m{tc['name']}\033[0m")
-                                        print(f"    Args: {tc['args']}")
-                                elif msg.content:
-                                    # Final answer usually
-                                    final_response_text = msg.content
-                    elif key == "tools":
-                         if "messages" in value:
-                            msg = value["messages"][-1]
-                            # Tool output
-                            # print(f"    Tool Output: {msg.content[:100]}...")
-                            print(f"    ✔ Tool '{msg.name}' executed.")
-            print("[End of Thinking]\n")
-
-            if not final_response_text:
-                # Fallback if we missed it (e.g. if the last step didn't explicitly return content in the expected way)
-                # This happens if the agent stops?
-                # Let's assume the last AIMessage in the loop was the answer.
-                pass
+            # If we still don't have text (maybe ended on a tool output?), try to find the last AI message
+            if not final_response_text and final_state:
+                 # This is tricky with 'updates' mode.
+                 # Let's rely on the capture inside the loop.
+                 pass
 
             response_text = final_response_text
 
@@ -504,6 +458,8 @@ class Agent:
                 self.session_manager.add_message(session_id, "ai", response_text)
 
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             response_data = {
                 "response": f"I encountered an error: {str(e)}",
                 "action": "error"

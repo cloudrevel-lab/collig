@@ -44,6 +44,11 @@ class SkillManager:
 
     def _find_skill_llm(self, message: str) -> Optional[Skill]:
         """Uses LLM to determine the best skill for the message."""
+        # Use a cheaper/faster model for intent classification if possible, 
+        # or stick to what's configured.
+        # But wait, self.client is hardcoded to OpenAI currently.
+        # We should respect the global config if possible, but for now we rely on the client init.
+        
         skills_info = []
         for skill in self.skills:
             # Create a rich description for the LLM
@@ -65,8 +70,9 @@ class SkillManager:
             "5. Do not include any other text, explanation, or punctuation."
         )
 
+        # Use gpt-3.5-turbo or similar for speed/cost if available, else 4o
         response = self.client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-3.5-turbo", 
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": message}

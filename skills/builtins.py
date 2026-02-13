@@ -10,13 +10,17 @@ class TimeSkill(Skill):
 
     @property
     def description(self) -> str:
-        return "Tells the current time."
+        return "Tells the current date and time."
 
-    def get_tools(self) -> List[BaseTool]:
+    @property
+    def triggers(self) -> List[str]:
+        return ["time", "clock", "what time", "date", "day", "what's the date", "what is the date"]
+
+    def load_tools(self) -> List[object]:
         @tool
         def get_current_time() -> str:
-            """Returns the current local time."""
-            return datetime.now().strftime("%H:%M")
+            """Returns the current local date and time."""
+            return datetime.now().strftime("%A, %B %d, %Y %H:%M:%S")
         
         return [get_current_time]
 
