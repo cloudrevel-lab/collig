@@ -1,3 +1,5 @@
+![Collig Banner](assets/banner.svg)
+
 # Collig: Your Intelligent AI Co-worker
 
 Collig is a powerful, locally-running AI agent designed to act as your personal pair programmer and digital assistant. It combines a robust Python backend with a modular skill system, allowing it to interact with your filesystem, browser, email, and more.
@@ -10,20 +12,17 @@ Collig is a powerful, locally-running AI agent designed to act as your personal 
     -   **Extensible:** Supports **Markdown-based Skills** (`SKILL.md`) compatible with the [Open Agent Skills](https://github.com/vercel-labs/skills) standard.
 -   **💾 Long-term Memory:** Uses a local vector database (ChromaDB) to remember your notes, preferences, and past conversations.
 -   **💻 Interactive CLI:** A rich terminal interface with autocompletion, session management, and history.
--   **🌐 Web Interface:** Includes a FastAPI backend and a Vue.js frontend.
 -   **🛡️ Secure & Local:** Runs on your machine. Includes `backup` and `restore` commands for easy data migration.
 
 ## 🛠️ Tech Stack
 
 -   **Backend:** Python 3.12+, FastAPI, LangChain, ChromaDB
--   **Frontend:** Vue.js, Vite
--   **Package Management:** `uv` (Python), `npm` (Node.js)
+-   **Package Management:** `uv` (Python)
 
 ## 📦 Installation
 
 Prerequisites:
 -   Python 3.12+
--   Node.js & npm
 -   `uv` (Python package manager)
 -   OpenAI API Key
 
@@ -53,14 +52,6 @@ make pa
 -   `/backup`: Backup your data (config, memory, sessions) to a zip file.
 -   `/restore <path>`: Restore data from a backup zip.
 -   `/config list`: View current configuration.
-
-### Full Stack (API + Frontend)
-Start both the backend API and frontend dev server:
-```bash
-make up
-```
--   Backend API: http://localhost:8000
--   Frontend: http://localhost:5173
 
 ### Managing Sessions
 List previous chat sessions:

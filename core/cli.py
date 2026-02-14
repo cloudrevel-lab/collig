@@ -8,8 +8,11 @@ import argparse
 import json
 import zipfile
 import shutil
+import time
 from datetime import datetime
 from rich.console import Console
+from rich.live import Live
+from rich.text import Text
 from rich.prompt import Prompt as RichPrompt, Confirm
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -254,10 +257,56 @@ def run_setup_wizard():
 
     console.print("\n[bold]Setup Complete![/bold]\n")
 
+def print_banner():
+    """Prints a cool ASCII art banner with a robot and typing animation."""
+    import zlib
+    import base64
+
+    _L = 'eJxTUHg0rQMdTZ2uwAUTnzrl0dQJSGguktREBTDAJjB1Fi5zwXIoRoJNrampweUULC6BSXIh2wxn4xLF7iigsXO5CLsK6BKcviVWAGs4Y7F4kNmNbCiRbKjBpMYrNIUh+QFZC/XiFQDYYadb'
+
+    def _d(s):
+        return zlib.decompress(base64.b64decode(s)).decode('utf-8')
+
+    letters = [block.split("\n") for block in _d(_L).split("|||")]
+
+    console.print() # Spacer
+
+    # Animate Wall-E driving from Right to Left
+    terminal_width = console.width
+    # Canvas to hold fixed/arrived letters
+    fixed_lines = [""] * 6
+
+    with Live(console=console, refresh_per_second=60, transient=False) as live:
+        for letter_lines in letters:
+            w = len(letter_lines[0])
+            for pad in range(terminal_width - len(fixed_lines[0]), 0, -5):
+                live.update(Text('\n'.join(fixed_lines[i] + ' ' * pad + letter_lines[i]
+                                         for i in range(6)), style="bold #C56F52"))
+                time.sleep(0.005)
+            for i in range(6):
+                fixed_lines[i] += letter_lines[i]
+
+        # Final update to ensure everything is clean
+        final_text = Text()
+        for line in fixed_lines:
+            final_text.append(line + "\n", style="bold #C56F52")
+        live.update(final_text)
+
+    # Typing animation for the tagline
+    tagline = "Your AI Assistant for Life & Work"
+
+    # Use console.print char-by-char with style to avoid markup nesting errors
+    for char in tagline:
+        console.print(char, style="italic dim", end="")
+        time.sleep(0.05)
+    console.print() # Newline after animation
+
 def main():
     parser = argparse.ArgumentParser(description="Collig CLI")
     parser.add_argument("--session", type=str, help="Session ID to resume")
     args = parser.parse_args()
+
+    print_banner()
 
     if not check_setup():
         run_setup_wizard()
@@ -265,6 +314,9 @@ def main():
     # Import agent AFTER setup to ensure env vars are loaded if agent relies on them at import time
     try:
         from agent import agent
+
+        # Newline after the overwriting registration logs
+        print()
 
         # Load and apply configuration to skills
         config = load_config()
@@ -310,7 +362,8 @@ def main():
         console.print(f"[bold cyan]New session started: {session_id}[/bold cyan]")
 
     console.print("[bold blue]Collig Co-worker AI - CLI Mode[/bold blue]")
-    console.print("Type 'exit' or 'quit' to end the session.\n")
+    console.print("Type [bold yellow]/[/bold yellow] to see available commands.")
+    console.print("Type [bold yellow]'exit'[/bold yellow] or [bold yellow]'quit'[/bold yellow] to end the session.\n")
 
     while True:
         try:

@@ -1,0 +1,22 @@
+<svg width="800" height="450" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background -->
+  <rect width="100%" height="100%" fill="black"/>
+  
+  <!-- Robot Icon (Top Left) -->
+  <g transform="translate(50, 50) scale(2)">
+    <text x="0" y="20" font-family="monospace" fill="#6bdad3" font-size="14">
+      <tspan x="0" dy="0">      ____</tspan>
+      <tspan x="0" dy="16">     [o__o]</tspan>
+      <tspan x="0" dy="16">     /____\</tspan>
+      <tspan x="0" dy="16">    /|    |\</tspan>
+      <tspan x="0" dy="16">   //|    |\\</tspan>
+      <tspan x="0" dy="16">  ///|____|\\\</tspan>
+      <tspan x="0" dy="16">  \0_0_0_0_0_0/</tspan>
+    </text>
+  </g>
+
+  <!-- Wordmark (Bottom) -->
+  <!-- Shadow/Outline layers -->
+  <text x="55" y="385" font-family="Arial, sans-serif" font-weight="bold" font-size="120" fill="none" stroke="#b34d47" stroke-width="4">COLLIG</text>
+  <text x="50" y="380" font-family="Arial, sans-serif" font-weight="bold" font-size="120" fill="#e6736b">COLLIG</text>
+</svg>

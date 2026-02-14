@@ -18,7 +18,11 @@ class SkillManager:
 
     def register_skill(self, skill: Skill):
         """Registers a new skill."""
-        print(f"Registering skill: {skill.name}")
+        # Use carriage return to overwrite line
+        # Pad with spaces to clear previous longer names
+        import sys
+        sys.stdout.write(f"\r\033[KRegistering skill: {skill.name}")
+        sys.stdout.flush()
         self.skills.append(skill)
 
     def find_skill(self, message: str) -> Optional[Skill]:
