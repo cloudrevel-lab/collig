@@ -47,6 +47,7 @@ class SkillCommandCompleter(Completer):
             ("backup", "Backup user data to a zip file"),
             ("restore", "Restore user data from a zip file"),
             ("provider", "Switch LLM provider (openai/llama)"),
+            ("status", "Check system status and LLM connection"),
             ("doctor", "Check system health and LLM connection"),
             ("test", "Alias for doctor"),
             ("run", "Run a shell command (e.g., /run ls -la)"),
@@ -335,6 +336,7 @@ def main():
 
         skills_start = time_module.time()
         console.print("[dim]Configuring skills...[/dim]")
+        agent.skill_manager.configure(config)
         for skill in agent.skill_manager.skills:
             skill.configure(config)
         skills_time = time_module.time() - skills_start
@@ -508,6 +510,86 @@ def main():
                 console.print(f"[green]{msg}[/green]")
                 continue
 
+            if user_input.startswith("status"):
+                console.print(Panel(f"[bold]System Status[/bold]\nChecking connection to {agent.llm_provider}...", title="Status Check"))
+
+                # Check 1: Provider Config
+                console.print(f"• Provider: [cyan]{agent.llm_provider}[/cyan]")
+                console.print(f"• Model: [cyan]{agent.llm_model}[/cyan]")
+
+                # Check 2: API Key / Connection
+                status = "[green]OK[/green]"
+                error_msg = ""
+                api_key_source = ""
+                api_key_preview = ""
+
+                def get_api_key_info(env_var_name):
+                    env_key = os.getenv(env_var_name)
+                    config_key = load_config().get(env_var_name)
+
+                    if config_key:
+                        source = "config.json"
+                        key = config_key
+                    elif env_key:
+                        source = "environment variable"
+                        key = env_key
+                    else:
+                        source = None
+                        key = None
+
+                    return key, source
+
+                if agent.llm_provider == "openai":
+                    api_key, source = get_api_key_info("OPENAI_API_KEY")
+                    if not api_key:
+                        status = "[red]MISSING API KEY[/red]"
+                        error_msg = "Please set OPENAI_API_KEY in config.json or .env via '/config set'"
+                    else:
+                        api_key_source = source
+                        api_key_preview = api_key[:10] + "..." + api_key[-4:] if len(api_key) > 14 else "***"
+                elif agent.llm_provider == "deepseek":
+                    api_key, source = get_api_key_info("DEEPSEEK_API_KEY")
+                    if not api_key:
+                        status = "[red]MISSING API KEY[/red]"
+                        error_msg = "Please set DEEPSEEK_API_KEY in config.json or .env via '/config set'"
+                    else:
+                        api_key_source = source
+                        api_key_preview = api_key[:10] + "..." + api_key[-4:] if len(api_key) > 14 else "***"
+                elif agent.llm_provider == "llama":
+                    # Check if ollama is running
+                    import subprocess
+                    try:
+                        subprocess.run(["ollama", "--version"], capture_output=True, check=True)
+                    except:
+                        status = "[red]OLLAMA NOT FOUND[/red]"
+                        error_msg = "Ensure Ollama is installed and running."
+
+                console.print(f"• Configuration: {status}")
+                if error_msg:
+                    console.print(f"  ➜ {error_msg}")
+                if api_key_source:
+                    console.print(f"  ➜ API Key Source: [cyan]{api_key_source}[/cyan]")
+                    console.print(f"  ➟ API Key: [dim]{api_key_preview}[/dim]")
+
+                # Check 3: Live LLM Request
+                if "OK" in status:
+                    console.print("• LLM Connection: [yellow]Testing...[/yellow]", end="\r")
+                    try:
+                        if hasattr(agent, "agent_executor"):
+                            test_msg = "what is 2+2"
+                            result = agent.process_message(test_msg, include_history=False, verbose=False)
+                            resp = result.get("response", "").strip()
+                            if resp:
+                                console.print("• LLM Connection: [green]OK[/green] (Response received)")
+                            else:
+                                console.print(f"• LLM Connection: [yellow]WARNING[/yellow] (Empty response)")
+                        else:
+                             console.print("• LLM Connection: [red]FAILED[/red] (Agent not initialized)")
+                    except Exception as e:
+                        console.print(f"• LLM Connection: [red]FAILED[/red] ({e})")
+
+                continue
+
             if user_input.startswith("doctor") or user_input.startswith("test"):
                 console.print(Panel(f"[bold]System Doctor[/bold]\nChecking connection to {agent.llm_provider}...", title="Health Check"))
 
@@ -585,7 +667,18 @@ def main():
             action = result["action"]
             data = result.get("data", {})
 
-            console.print(f"[bold blue]Collig:[/bold blue] {response}")
+            # Check if response contains markdown formatting
+            if "**" in response or "#" in response or "[" in response:
+                # Render as markdown
+                console.print("[bold blue]Collig:[/bold blue]")
+                try:
+                    console.print(Markdown(response))
+                except Exception:
+                    # Fallback to plain text if markdown rendering fails
+                    console.print(response)
+            else:
+                # Render as plain text
+                console.print(f"[bold blue]Collig:[/bold blue] {response}")
 
             if action:
                 console.print(f"[dim italic]Action triggered: {action}[/dim italic]")
