@@ -3,6 +3,14 @@ from datetime import datetime
 from langchain_core.tools import tool, BaseTool
 from .base import Skill
 
+# Global reference to agent - will be set by agent when registering skills
+_agent_instance = None
+
+def set_agent_instance(agent):
+    """Sets the global agent instance for skills that need it."""
+    global _agent_instance
+    _agent_instance = agent
+
 class TimeSkill(Skill):
     @property
     def name(self) -> str:
@@ -79,5 +87,42 @@ class BrowserSkill(Skill):
                     return "Failed to open browser (webbrowser returned False)"
             except Exception as e:
                 return f"Failed to open browser: {e}"
-                
+
         return [open_browser]
+
+class ThinkingToggleSkill(Skill):
+    @property
+    def name(self) -> str:
+        return "Thinking Toggle"
+
+    @property
+    def description(self) -> str:
+        return "Hide or show the thinking process messages."
+
+    @property
+    def triggers(self) -> List[str]:
+        return ["hide thinking", "show thinking", "toggle thinking", "turn off thinking", "turn on thinking", "quiet mode", "verbose mode"]
+
+    def get_tools(self) -> List[BaseTool]:
+        @tool
+        def hide_thinking() -> str:
+            """Hides the thinking process messages."""
+            if _agent_instance:
+                return _agent_instance.set_verbose(False)
+            return "Thinking messages hidden."
+
+        @tool
+        def show_thinking() -> str:
+            """Shows the thinking process messages."""
+            if _agent_instance:
+                return _agent_instance.set_verbose(True)
+            return "Thinking messages shown."
+
+        @tool
+        def toggle_thinking() -> str:
+            """Toggles whether thinking process messages are shown."""
+            if _agent_instance:
+                return _agent_instance.toggle_verbose()
+            return "Thinking messages toggled."
+
+        return [hide_thinking, show_thinking, toggle_thinking]

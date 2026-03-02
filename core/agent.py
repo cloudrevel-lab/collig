@@ -1,7 +1,7 @@
 import os
 from typing import List, Dict, Any, Optional
 from skills.manager import SkillManager
-from skills.builtins import TimeSkill, BrowserSkill
+from skills.builtins import TimeSkill, BrowserSkill, ThinkingToggleSkill, set_agent_instance
 from skills.filesystem import FileSystemSkill
 from skills.programming import ProgrammingSkill
 from skills.email import EmailSkill
@@ -17,6 +17,8 @@ from skills.news import NewsSkill
 from skills.profile import ProfileSkill
 from skills.git import GitSkill
 from skills.date_calculator import DateCalculatorSkill
+from skills.cache import CacheSkill
+from skills.lunar_calendar import LunarCalendarSkill
 from core.session import SessionManager
 from core.paths import paths
 
@@ -28,11 +30,15 @@ from langchain_core.tools import tool
 
 class Agent:
     def __init__(self):
+        import time as time_module
+        init_start = time_module.time()
+
         self.name = "Collig"
         self.skill_manager = SkillManager()
         self.session_manager = SessionManager()
         self.shared_context = {} # Store runtime context (e.g., last_created_dir)
         self.active_skill_name = None # For multi-turn skills
+        self.verbose = True # Show thinking messages by default
 
         # Load provider config from config.json (persistence) AND env
         # Config.json takes precedence for user preference
@@ -42,15 +48,32 @@ class Agent:
                 config = json.load(f)
                 self.llm_provider = config.get("LLM_PROVIDER", os.getenv("LLM_PROVIDER", "openai"))
                 self.llm_model = config.get("LLM_MODEL", os.getenv("LLM_MODEL", "gpt-4o"))
+                self.verbose = config.get("VERBOSE_THINKING", True)
         except Exception:
              self.llm_provider = os.getenv("LLM_PROVIDER", "openai")
              self.llm_model = os.getenv("LLM_MODEL", "gpt-4o")
+             self.verbose = True
 
+        print(f"[dim]Basic setup: {time_module.time() - init_start:.2f}s[/dim]")
+
+        skills_start = time_module.time()
         self._register_initial_skills()
+        print(f"[dim]Initial skills registered: {time_module.time() - skills_start:.2f}s[/dim]")
+
+        external_start = time_module.time()
         self._load_external_skills()
+        print(f"[dim]External skills loaded: {time_module.time() - external_start:.2f}s[/dim]")
+
+        # Set global agent reference for skills that need it
+        from skills.builtins import set_agent_instance
+        set_agent_instance(self)
 
         # Initialize LangChain/LangGraph Agent
+        langchain_start = time_module.time()
+        print(f"[dim]Initializing LangChain agent...[/dim]")
         self._init_langchain_agent()
+        print(f"[dim]LangChain agent initialized: {time_module.time() - langchain_start:.2f}s[/dim]")
+        print(f"[dim]Total agent initialization: {time_module.time() - init_start:.2f}s[/dim]")
 
     def set_provider(self, provider: str, model: str = None):
         """Switches the LLM provider (openai/llama)."""
@@ -67,6 +90,34 @@ class Agent:
         print(f"Switching provider to {self.llm_provider} (Model: {self.llm_model})")
         self._init_langchain_agent()
         return f"Provider switched to {self.llm_provider} ({self.llm_model})"
+
+    def set_verbose(self, enabled: bool) -> str:
+        """Sets whether to show thinking messages and saves to config."""
+        self.verbose = enabled
+
+        # Save to config
+        import json
+        try:
+            if os.path.exists(paths.global_config_file):
+                with open(paths.global_config_file, "r") as f:
+                    config = json.load(f)
+            else:
+                config = {}
+
+            config["VERBOSE_THINKING"] = enabled
+            with open(paths.global_config_file, "w") as f:
+                json.dump(config, f, indent=2)
+
+            status = "enabled" if enabled else "disabled"
+            return f"Thinking messages {status}. Preference saved."
+        except Exception as e:
+            status = "enabled" if enabled else "disabled"
+            return f"Thinking messages {status}, but failed to save preference: {e}"
+
+    def toggle_verbose(self) -> str:
+        """Toggles whether to show thinking messages."""
+        new_state = not self.verbose
+        return self.set_verbose(new_state)
 
     def get_available_models(self) -> str:
         """Returns a string listing available models for the current or specified provider."""
@@ -105,6 +156,7 @@ class Agent:
         """Registers the built-in skills."""
         self.skill_manager.register_skill(TimeSkill())
         self.skill_manager.register_skill(BrowserSkill())
+        self.skill_manager.register_skill(ThinkingToggleSkill())
         self.skill_manager.register_skill(WeatherSkill())
         self.skill_manager.register_skill(FileSystemSkill())
         self.skill_manager.register_skill(EmailSkill())
@@ -118,6 +170,8 @@ class Agent:
         self.skill_manager.register_skill(ProfileSkill())
         self.skill_manager.register_skill(GitSkill())
         self.skill_manager.register_skill(DateCalculatorSkill())
+        self.skill_manager.register_skill(CacheSkill())
+        self.skill_manager.register_skill(LunarCalendarSkill())
         # self.skill_manager.register_skill(ChatSkill()) # Fallback / General Skill
 
     def _init_langchain_agent(self):
@@ -186,7 +240,16 @@ class Agent:
 
         # Create React Agent (LangGraph)
         # Note: prompt can be a string (system prompt) or a SystemMessage.
-        system_prompt = "You are Collig, an intelligent AI co-worker. Use the available tools to assist the user. If you need to write code, use the file system tools."
+        system_prompt = """You are Collig, an intelligent AI co-worker. Use the available tools to assist the user. If you need to write code, use the file system tools.
+
+IMPORTANT: When users refer to news items, articles, or search results by number (e.g., "show me item 2", "read article 3", "tell me about number 5"), you should:
+1. First check if there's context from a recent news search by using the check_news_cache tool
+2. If news items are available, use the read_news_item tool with the specified number
+3. If no news items are available, inform the user they need to search for news first
+
+Similarly, when users ask to cache or save search results, use the appropriate cache tools.
+
+CRITICAL: Whenever users ask about Chinese calendar, lunar calendar, 农历, 阴历, zodiac, Chinese zodiac, or Chinese year dates, YOU MUST USE the get_lunar_date tool. DO NOT try to answer from your own knowledge - always use the tool."""
         self.agent_executor = create_react_agent(llm, self.tools, prompt=system_prompt)
 
     def _load_external_skills(self):
@@ -302,10 +365,14 @@ class Agent:
         return fallback_msgs
 
 
-    def process_message(self, message: str, session_id: str = None, include_history: bool = True, verbose: bool = True) -> dict:
+    def process_message(self, message: str, session_id: str = None, include_history: bool = True, verbose: bool = None) -> dict:
         """
         Process a user message, optionally within a session context.
+        If verbose is not specified, uses the instance's verbose setting.
         """
+        if verbose is None:
+            verbose = self.verbose
+
         # Save user message to history if session_id is provided
         if session_id:
             self.session_manager.add_message(session_id, "user", message)

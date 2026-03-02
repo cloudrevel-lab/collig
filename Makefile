@@ -1,4 +1,4 @@
-.PHONY: help install up down dev core frontend pa list-sessions
+.PHONY: help install up down dev core frontend pa list-sessions lint
 
 help:
 	@echo "Available commands:"
@@ -11,6 +11,7 @@ help:
 	@echo "  make pa            - Start the interactive CLI co-worker"
 	@echo "                       Usage: make pa [session=SESSION_ID]"
 	@echo "  make list-sessions - List available chat sessions"
+	@echo "  make lint          - Run isort, black, and flake8 on modified files (max line length 120)"
 
 install:
 	cd core && uv venv && uv sync
@@ -27,6 +28,11 @@ pa:
 
 list-sessions:
 	cd core && uv run python list_sessions.py
+
+lint:
+	uv run isort --check-only --diff skills/lunar_calendar/__init__.py
+	uv run black --check --diff --line-length 120 skills/lunar_calendar/__init__.py
+	uv run flake8 --max-line-length 120 skills/lunar_calendar/__init__.py
 
 up:
 	@echo "Starting services..."

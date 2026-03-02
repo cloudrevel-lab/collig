@@ -51,6 +51,9 @@ class SkillCommandCompleter(Completer):
             ("test", "Alias for doctor"),
             ("run", "Run a shell command (e.g., /run ls -la)"),
             ("restart", "Restart the session (reload code)"),
+            ("quiet", "Hide thinking messages"),
+            ("verbose", "Show thinking messages"),
+            ("toggle thinking", "Toggle thinking messages visibility"),
             ("exit", "Exit the application"),
             ("quit", "Exit the application"),
             ("clear", "Clear the screen")
@@ -313,15 +316,29 @@ def main():
 
     # Import agent AFTER setup to ensure env vars are loaded if agent relies on them at import time
     try:
+        import time as time_module
+        start_time = time_module.time()
+        console.print("[dim]Importing skills...[/dim]")
         from agent import agent
+        import_time = time_module.time() - start_time
+        console.print(f"[dim]Agent imported in {import_time:.2f}s[/dim]")
 
         # Newline after the overwriting registration logs
         print()
 
         # Load and apply configuration to skills
+        config_start = time_module.time()
+        console.print("[dim]Loading configuration...[/dim]")
         config = load_config()
+        config_time = time_module.time() - config_start
+        console.print(f"[dim]Configuration loaded in {config_time:.2f}s[/dim]")
+
+        skills_start = time_module.time()
+        console.print("[dim]Configuring skills...[/dim]")
         for skill in agent.skill_manager.skills:
             skill.configure(config)
+        skills_time = time_module.time() - skills_start
+        console.print(f"[dim]Skills configured in {skills_time:.2f}s[/dim]")
 
     except Exception as e:
         console.print(f"[bold red]Failed to initialize agent:[/bold red] {e}")
@@ -474,6 +491,21 @@ def main():
                     config["LLM_MODEL"] = agent.llm_model
                     save_config(config)
                     console.print("[dim]Preference saved to config.json[/dim]")
+                continue
+
+            if user_input.lower() == "quiet" or user_input.lower().startswith("quiet "):
+                msg = agent.set_verbose(False)
+                console.print(f"[green]{msg}[/green]")
+                continue
+
+            if user_input.lower() == "verbose" or user_input.lower().startswith("verbose "):
+                msg = agent.set_verbose(True)
+                console.print(f"[green]{msg}[/green]")
+                continue
+
+            if user_input.lower().startswith("toggle thinking"):
+                msg = agent.toggle_verbose()
+                console.print(f"[green]{msg}[/green]")
                 continue
 
             if user_input.startswith("doctor") or user_input.startswith("test"):
