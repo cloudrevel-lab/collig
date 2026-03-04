@@ -16,6 +16,7 @@ class NewsSkill(Skill):
     # Use class-level cache to ensure persistence across tool calls/copies
     _news_cache: List[Dict[str, Any]] = []
     _last_query: str = ""
+    _just_searched: bool = False  # Flag to indicate a search just completed
 
     def __init__(self):
         super().__init__()
@@ -24,6 +25,26 @@ class NewsSkill(Skill):
         # But if we want per-session isolation in a server, this would need a SessionManager-based approach.
         # Given the current CLI context, this is the fix.
         pass
+
+    @classmethod
+    def get_news_cache(cls):
+        """Get the current news cache."""
+        return cls._news_cache
+
+    @classmethod
+    def get_last_query(cls):
+        """Get the last search query."""
+        return cls._last_query
+
+    @classmethod
+    def has_just_searched(cls):
+        """Check if a search just completed."""
+        return cls._just_searched
+
+    @classmethod
+    def clear_search_flag(cls):
+        """Clear the just-searched flag."""
+        cls._just_searched = False
 
     @property
     def name(self) -> str:
@@ -47,6 +68,7 @@ class NewsSkill(Skill):
 
                 NewsSkill._news_cache = results
                 NewsSkill._last_query = query
+                NewsSkill._just_searched = True
                 print(f"DEBUG: NewsSkill._news_cache updated. Size: {len(NewsSkill._news_cache)} ID: {id(NewsSkill._news_cache)} ClassID: {id(NewsSkill)}")
 
                 output = [f"Found {len(results)} news items for '{query}':\n"]
@@ -106,7 +128,7 @@ class NewsSkill(Skill):
                 import os
                 import datetime
 
-                api_key = os.getenv("OPENAI_API_KEY")
+                api_key = self.config.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
                 if not api_key:
                     return "Cache system requires OPENAI_API_KEY to be set."
 

@@ -29,6 +29,9 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     response: str
     action: str | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
 
 @app.get("/")
 def read_root():
@@ -41,4 +44,10 @@ def health_check():
 @app.post("/api/chat", response_model=ChatResponse)
 def chat_endpoint(request: ChatRequest):
     result = agent.process_message(request.message)
-    return ChatResponse(response=result["response"], action=result["action"])
+    return ChatResponse(
+        response=result["response"],
+        action=result["action"],
+        prompt_tokens=result.get("prompt_tokens"),
+        completion_tokens=result.get("completion_tokens"),
+        total_tokens=result.get("total_tokens")
+    )

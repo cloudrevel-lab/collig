@@ -12,9 +12,6 @@ class ChatSkill(Skill):
     def __init__(self):
         super().__init__()
         self.llm = None
-        api_key = os.getenv("OPENAI_API_KEY")
-        if ChatOpenAI and api_key:
-            self.llm = ChatOpenAI(api_key=api_key, model="gpt-4o", temperature=0.7)
 
     @property
     def name(self) -> str:

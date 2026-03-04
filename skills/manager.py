@@ -11,10 +11,13 @@ class SkillManager:
     def __init__(self):
         self.skills: List[Skill] = []
         self.client = None
-        # Check for API key and initialize client
-        api_key = os.getenv("OPENAI_API_KEY")
-        if OpenAI and api_key:
-            self.client = OpenAI(api_key=api_key)
+
+    def configure(self, config: Dict[str, Any]):
+        """Configure the skill manager with settings."""
+        if not self.client:
+            api_key = config.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+            if OpenAI and api_key:
+                self.client = OpenAI(api_key=api_key)
 
     def register_skill(self, skill: Skill):
         """Registers a new skill."""

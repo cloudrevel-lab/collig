@@ -87,7 +87,7 @@ class BookmarkSkill(Skill):
         @tool
         def list_bookmarks() -> str:
             """
-            List the 10 most recent bookmarks.
+            List the 10 most recent bookmarks with timestamps.
             """
             if not self.vectorstore:
                 return "Bookmark system not initialized."
@@ -118,6 +118,13 @@ class BookmarkSkill(Skill):
                     meta = item["metadata"]
                     url = meta.get("url", "No URL")
                     tags = meta.get("tags", "")
+                    timestamp = meta.get("timestamp", "")
+                    # Format timestamp for readability
+                    try:
+                        dt = datetime.datetime.fromisoformat(timestamp)
+                        formatted_time = dt.strftime("%Y-%m-%d %H:%M")
+                    except:
+                        formatted_time = timestamp
                     # Extract description from content (simple parse or just show content)
                     # Content format: "URL: ...\nDescription: ...\nTags: ..."
                     content_lines = item["content"].split('\n')
@@ -126,8 +133,8 @@ class BookmarkSkill(Skill):
                         if line.startswith("Description:"):
                             desc = line.replace("Description:", "").strip()
                             break
-                    
-                    output.append(f"{idx}. [{url}] - {desc} (Tags: {tags})")
+
+                    output.append(f"{idx}. [{formatted_time}] {url} - {desc} (Tags: {tags})")
 
                 return "\n".join(output)
             except Exception as e:
@@ -175,7 +182,7 @@ class BookmarkSkill(Skill):
 
             ids_to_delete = []
             deleted_indices = []
-            
+
             for idx in indices:
                 if 1 <= idx <= len(self.last_retrieved_ids):
                     ids_to_delete.append(self.last_retrieved_ids[idx - 1])
@@ -187,4 +194,84 @@ class BookmarkSkill(Skill):
             self.vectorstore.delete(ids=ids_to_delete)
             return f"Deleted bookmarks at indices: {deleted_indices}"
 
-        return [add_bookmark, list_bookmarks, search_bookmarks, delete_bookmarks]
+        @tool
+        def search_bookmarks_by_date(start_date: str, end_date: str = "") -> str:
+            """
+            Search for bookmarks saved within a specific date range.
+            Args:
+                start_date: Start date in YYYY-MM-DD format (inclusive)
+                end_date: End date in YYYY-MM-DD format (inclusive, optional - defaults to start_date)
+            """
+            if not self.vectorstore:
+                return "Bookmark system not initialized."
+
+            try:
+                # Parse dates
+                try:
+                    start_dt = datetime.datetime.strptime(start_date, "%Y-%m-%d")
+                    start_dt = start_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+                except ValueError:
+                    return f"Invalid start_date format: {start_date}. Please use YYYY-MM-DD."
+
+                if end_date:
+                    try:
+                        end_dt = datetime.datetime.strptime(end_date, "%Y-%m-%d")
+                        end_dt = end_dt.replace(hour=23, minute=59, second=59, microsecond=999999)
+                    except ValueError:
+                        return f"Invalid end_date format: {end_date}. Please use YYYY-MM-DD."
+                else:
+                    end_dt = start_dt.replace(hour=23, minute=59, second=59, microsecond=999999)
+
+                collection = self.vectorstore._collection
+                data = collection.get(limit=100, include=["documents", "metadatas"])
+
+                docs = data.get("documents", [])
+                metas = data.get("metadatas", [])
+                ids = data.get("ids", [])
+
+                # Filter by date range
+                matches = []
+                for d, m, i in zip(docs, metas, ids):
+                    ts_str = m.get("timestamp", "")
+                    if not ts_str:
+                        continue
+                    try:
+                        bookmark_dt = datetime.datetime.fromisoformat(ts_str)
+                        if start_dt <= bookmark_dt <= end_dt:
+                            matches.append({"content": d, "metadata": m, "id": i})
+                    except:
+                        continue
+
+                # Sort by timestamp descending
+                matches.sort(key=lambda x: x["metadata"].get("timestamp", ""), reverse=True)
+
+                self.last_retrieved_ids = [m["id"] for m in matches]
+
+                if not matches:
+                    date_range = f"{start_date} to {end_date}" if end_date else start_date
+                    return f"No bookmarks found for date range: {date_range}"
+
+                output = [f"Found {len(matches)} bookmark(s) for {start_date}" + (f" to {end_date}" if end_date else "") + ":"]
+                for idx, item in enumerate(matches, 1):
+                    meta = item["metadata"]
+                    url = meta.get("url", "No URL")
+                    tags = meta.get("tags", "")
+                    timestamp = meta.get("timestamp", "")
+                    try:
+                        dt = datetime.datetime.fromisoformat(timestamp)
+                        formatted_time = dt.strftime("%Y-%m-%d %H:%M")
+                    except:
+                        formatted_time = timestamp
+                    content_lines = item["content"].split('\n')
+                    desc = "No description"
+                    for line in content_lines:
+                        if line.startswith("Description:"):
+                            desc = line.replace("Description:", "").strip()
+                            break
+                    output.append(f"{idx}. [{formatted_time}] {url} - {desc} (Tags: {tags})")
+
+                return "\n".join(output)
+            except Exception as e:
+                return f"Error searching bookmarks by date: {e}"
+
+        return [add_bookmark, list_bookmarks, search_bookmarks, delete_bookmarks, search_bookmarks_by_date]

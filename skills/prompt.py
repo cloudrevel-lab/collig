@@ -19,11 +19,6 @@ class PromptSkill(Skill):
         self.content = content # The system prompt
         self.path = path
         self.client = None
-        
-        # Initialize OpenAI client
-        api_key = os.getenv("OPENAI_API_KEY")
-        if OpenAI and api_key:
-            self.client = OpenAI(api_key=api_key)
 
     @property
     def name(self) -> str:
@@ -40,7 +35,22 @@ class PromptSkill(Skill):
         # Let's use the name words as basic triggers.
         return self._name.lower().split()
 
+    def _initialize_client(self):
+        """Attempts to initialize the OpenAI client if configuration is available."""
+        if self.client:
+            return
+
+        api_key = self.config.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+
+        if OpenAI and api_key:
+            try:
+                self.client = OpenAI(api_key=api_key)
+            except Exception as e:
+                print(f"Failed to initialize OpenAI client: {e}")
+
     def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        self._initialize_client()
+
         if not self.client:
              return {
                 "response": "Error: OpenAI API key not found. This skill requires an LLM.",
@@ -48,7 +58,7 @@ class PromptSkill(Skill):
             }
 
         user_message = context.get("message", "")
-        
+
         # Combine skill instructions with user message
         try:
             response = self.client.chat.completions.create(
@@ -59,13 +69,13 @@ class PromptSkill(Skill):
                 ],
                 temperature=0.7
             )
-            
+
             content = response.choices[0].message.content
             return {
                 "response": content,
                 "action": None
             }
-            
+
         except Exception as e:
             return {
                 "response": f"Error executing skill '{self.name}': {str(e)}",

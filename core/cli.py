@@ -25,6 +25,9 @@ from prompt_toolkit.styles import Style
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.document import Document
+from prompt_toolkit.formatted_text import HTML, to_formatted_text
+from prompt_toolkit.shortcuts import prompt
+from prompt_toolkit.key_binding import KeyBindings
 
 class SkillCommandCompleter(Completer):
     def __init__(self, agent):
@@ -42,12 +45,17 @@ class SkillCommandCompleter(Completer):
 
         # Built-in commands
         commands = [
+            ("config", "Interactive configuration manager"),
             ("config list", "Show current configuration"),
             ("config set", "Set a configuration value"),
             ("backup", "Backup user data to a zip file"),
             ("restore", "Restore user data from a zip file"),
-            ("provider", "Switch LLM provider (openai/llama)"),
+            ("provider", "Switch LLM provider (openai/ollama/llama/deepseek)"),
+            ("news", "Open interactive news browser (if news was searched)"),
             ("status", "Check system status and LLM connection"),
+            ("stats", "Show token usage statistics (session + overall)"),
+            ("stats session", "Show token usage for current session"),
+            ("stats overall", "Show overall token usage across all sessions"),
             ("doctor", "Check system health and LLM connection"),
             ("test", "Alias for doctor"),
             ("run", "Run a shell command (e.g., /run ls -la)"),
@@ -55,6 +63,7 @@ class SkillCommandCompleter(Completer):
             ("quiet", "Hide thinking messages"),
             ("verbose", "Show thinking messages"),
             ("toggle thinking", "Toggle thinking messages visibility"),
+            ("toggle markdown", "Toggle markdown rendering"),
             ("exit", "Exit the application"),
             ("quit", "Exit the application"),
             ("clear", "Clear the screen")
@@ -82,10 +91,307 @@ class SkillCommandCompleter(Completer):
 # Load environment variables
 load_dotenv()
 
-console = Console()
-
 # Use paths.global_config_file instead of local config.json
 CONFIG_FILE = paths.global_config_file
+
+# Global markdown preference (will be initialized after config loading)
+ENABLE_MARKDOWN = True
+
+# Configure console with better markdown support
+console = Console(force_terminal=True, color_system="truecolor")
+
+
+def interactive_menu(title: str, options: list, default_index: int = 0) -> int:
+    """
+    Display an interactive menu with arrow key navigation.
+
+    Args:
+        title: The menu title/prompt
+        options: List of option strings to display
+        default_index: The initially selected option index
+
+    Returns:
+        The index of the selected option, or -1 if cancelled
+    """
+    from prompt_toolkit import Application
+    from prompt_toolkit.layout import Layout, HSplit, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+    from prompt_toolkit.layout.dimension import Dimension
+    from prompt_toolkit.key_binding import KeyBindings
+
+    selected_index = default_index
+
+    def get_menu_text():
+        result = []
+        result.append(("bold", f"{title}\n\n"))
+        for i, option in enumerate(options):
+            if i == selected_index:
+                result.append(("bold cyan", f" > {option}\n"))
+            else:
+                result.append(("", f"   {option}\n"))
+        result.append(("", "\n[↑/↓] Navigate  [Enter] Select  [Esc] Cancel"))
+        return to_formatted_text(result)
+
+    kb = KeyBindings()
+
+    @kb.add("up")
+    def move_up(event):
+        nonlocal selected_index
+        selected_index = (selected_index - 1) % len(options)
+        menu_control.text = get_menu_text()
+
+    @kb.add("down")
+    def move_down(event):
+        nonlocal selected_index
+        selected_index = (selected_index + 1) % len(options)
+        menu_control.text = get_menu_text()
+
+    @kb.add("enter")
+    def select(event):
+        event.app.exit(result=selected_index)
+
+    @kb.add("escape")
+    def cancel(event):
+        event.app.exit(result=-1)
+
+    @kb.add("c-c")
+    def ctrl_c(event):
+        event.app.exit(result=-1)
+
+    menu_control = FormattedTextControl(text=get_menu_text())
+    window = Window(content=menu_control, width=Dimension(min=40), height=Dimension(min=len(options) + 5))
+
+    layout = Layout(HSplit([window]))
+    app = Application(layout=layout, key_bindings=kb, full_screen=False)
+
+    try:
+        result = app.run()
+        return result
+    except:
+        return -1
+
+
+def interactive_select(title: str, options: list, default_index: int = 0) -> str:
+    """
+    Display an interactive menu and return the selected option text.
+
+    Args:
+        title: The menu title/prompt
+        options: List of option strings to display
+        default_index: The initially selected option index
+
+    Returns:
+        The selected option string, or None if cancelled
+    """
+    try:
+        idx = interactive_menu(title, options, default_index)
+        if idx >= 0 and idx < len(options):
+            return options[idx]
+        return None
+    except Exception as e:
+        # Fallback to simple prompt if menu fails
+        console.print(f"[dim]Interactive menu failed, using simple selection.[/dim]")
+        for i, opt in enumerate(options):
+            console.print(f"  {i+1}. {opt}")
+        choice = console.input("[bold]Select an option (number):[/bold] ")
+        try:
+            idx = int(choice) - 1
+            if 0 <= idx < len(options):
+                return options[idx]
+        except:
+            pass
+        return options[0] if options else None
+
+
+# Global reference to news cache access functions
+_news_functions = None
+
+def set_news_functions(get_cache_func, get_query_func):
+    """Set the news functions from the NewsSkill."""
+    global _news_functions
+    _news_functions = {
+        "get_cache": get_cache_func,
+        "get_query": get_query_func
+    }
+
+
+def interactive_news_menu(news_items: list, query: str = "") -> dict:
+    """
+    Display an interactive news menu with navigation and actions.
+
+    Args:
+        news_items: List of news item dicts from DDGS
+        query: The original search query
+
+    Returns:
+        Dict with action type and data, or None if cancelled
+    """
+    from prompt_toolkit import Application
+    from prompt_toolkit.layout import Layout, HSplit, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+    from prompt_toolkit.layout.dimension import Dimension
+    from prompt_toolkit.key_binding import KeyBindings
+
+    if not news_items:
+        return None
+
+    selected_index = 0
+    mode = "list"  # "list" or "detail"
+
+    def truncate_text(text: str, max_len: int = 60) -> str:
+        if not text:
+            return ""
+        return text[:max_len] + "..." if len(text) > max_len else text
+
+    def get_list_text():
+        result = []
+        result.append(("bold cyan", "📰 News Browser"))
+        if query:
+            result.append(("", f" - {query}\n\n"))
+        else:
+            result.append(("", "\n\n"))
+
+        for i, item in enumerate(news_items):
+            title = item.get('title', 'No Title')
+            source = item.get('source', 'Unknown')
+            date = item.get('date', '')
+
+            display_title = truncate_text(title, 55)
+            prefix = " > " if i == selected_index else "   "
+
+            if i == selected_index:
+                result.append(("bold reverse", f"{prefix}{i+1}. [{source}] {display_title}"))
+                if date:
+                    result.append(("dim", f" ({date})"))
+                result.append(("", "\n"))
+            else:
+                line = f"{prefix}{i+1}. [{source}] {display_title}"
+                if date:
+                    line += f" ({date})"
+                result.append(("", line + "\n"))
+
+        result.append(("", "\n"))
+        result.append(("dim", "[↑/↓] Navigate  [Enter] Read  [o] Open  [c] Cache All  [Esc] Quit"))
+        return to_formatted_text(result)
+
+    def get_detail_text():
+        item = news_items[selected_index]
+        title = item.get('title', 'No Title')
+        body = item.get('body', 'No content available.')
+        source = item.get('source', 'Unknown')
+        url = item.get('url', '#')
+        date = item.get('date', '')
+
+        result = []
+        result.append(("bold cyan", f"📰 {title}\n\n"))
+        result.append(("dim", f"Source: {source}"))
+        if date:
+            result.append(("dim", f" | {date}"))
+        result.append(("", "\n\n"))
+        result.append(("", f"{body}\n\n"))
+        result.append(("cyan", f"Link: {url}\n\n"))
+        result.append(("dim", "[b] Back  [o] Open in Browser  [Esc] Quit"))
+        return to_formatted_text(result)
+
+    kb = KeyBindings()
+
+    @kb.add("up")
+    def move_up(event):
+        nonlocal selected_index
+        if mode == "list":
+            selected_index = (selected_index - 1) % len(news_items)
+            menu_control.text = get_list_text()
+
+    @kb.add("down")
+    def move_down(event):
+        nonlocal selected_index
+        if mode == "list":
+            selected_index = (selected_index + 1) % len(news_items)
+            menu_control.text = get_list_text()
+
+    @kb.add("enter")
+    def read_item(event):
+        nonlocal mode
+        if mode == "list":
+            mode = "detail"
+            menu_control.text = get_detail_text()
+
+    @kb.add("b")
+    def back_to_list(event):
+        nonlocal mode
+        if mode == "detail":
+            mode = "list"
+            menu_control.text = get_list_text()
+
+    @kb.add("o")
+    def open_url(event):
+        item = news_items[selected_index]
+        url = item.get('url')
+        if url and url != '#':
+            event.app.exit(result={"action": "open", "url": url, "index": selected_index})
+        else:
+            console.print("[yellow]No URL available for this item[/yellow]")
+
+    @kb.add("c")
+    def cache_list(event):
+        event.app.exit(result={"action": "cache_all"})
+
+    @kb.add("escape")
+    @kb.add("q")
+    def quit(event):
+        event.app.exit(result=None)
+
+    @kb.add("c-c")
+    def ctrl_c(event):
+        event.app.exit(result=None)
+
+    menu_control = FormattedTextControl(text=get_list_text())
+    window = Window(
+        content=menu_control,
+        width=Dimension(min=60, preferred=90),
+        height=Dimension(min=15, preferred=25)
+    )
+
+    layout = Layout(HSplit([window]))
+    app = Application(layout=layout, key_bindings=kb, full_screen=False)
+
+    try:
+        result = app.run()
+        return result
+    except Exception as e:
+        console.print(f"[dim]News menu error: {e}[/dim]")
+        return None
+
+
+def handle_news_action(action_result: dict, agent):
+    """Handle the action selected from the news menu."""
+    if not action_result:
+        return
+
+    action = action_result.get("action")
+
+    if action == "open":
+        url = action_result.get("url")
+        if url:
+            import webbrowser
+            try:
+                webbrowser.open(url)
+                console.print(f"[green]Opening: {url}[/green]")
+            except Exception as e:
+                console.print(f"[red]Failed to open browser: {e}[/red]")
+
+    elif action == "cache_all":
+        console.print("[dim]Caching all news items...[/dim]")
+        try:
+            # Find and call the cache_news_list tool
+            for tool in agent.tools:
+                if tool.name == "cache_news_list":
+                    result = tool.invoke({})
+                    console.print(f"[green]{result}[/green]")
+                    break
+        except Exception as e:
+            console.print(f"[red]Failed to cache: {e}[/red]")
+
 
 def load_config():
     if os.path.exists(CONFIG_FILE):
@@ -154,27 +460,449 @@ def handle_restore_command(command_parts):
     except Exception as e:
         console.print(f"[bold red]Restore failed:[/bold red] {e}")
 
-def load_config():
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, "r") as f:
-            return json.load(f)
-    return {}
+def get_config_schema(agent=None):
+    """
+    Define the configuration schema with types, descriptions, and options.
+    Returns a list of config item definitions.
+    """
+    schema = []
 
-def save_config(config):
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(config, f, indent=2)
+    # LLM Settings
+    schema.append({
+        "key": "LLM_MODEL",
+        "type": "string",
+        "default": "gpt-4o",
+        "category": "LLM",
+        "description": "Primary LLM model to use (e.g., gpt-4o, qwen3:8b, llama3.1)"
+    })
+
+    schema.append({
+        "key": "LLM_PROVIDER",
+        "type": "choice",
+        "default": "openai",
+        "options": ["openai", "ollama", "llama", "deepseek"],
+        "category": "LLM",
+        "description": "LLM provider"
+    })
+
+    # UI Settings
+    schema.append({
+        "key": "VERBOSE_THINKING",
+        "type": "boolean",
+        "default": True,
+        "category": "UI",
+        "description": "Show detailed thinking process"
+    })
+
+    schema.append({
+        "key": "ENABLE_MARKDOWN",
+        "type": "boolean",
+        "default": True,
+        "category": "UI",
+        "description": "Enable markdown rendering"
+    })
+
+    # API Keys
+    schema.append({
+        "key": "OPENAI_API_KEY",
+        "type": "secret",
+        "default": "",
+        "category": "API Keys",
+        "description": "OpenAI API Key (required)"
+    })
+
+    schema.append({
+        "key": "google_maps_api_key",
+        "type": "secret",
+        "default": "",
+        "category": "API Keys",
+        "description": "Google Maps API Key (for Map skill)"
+    })
+
+    # Add any additional configs from agent skills
+    if agent:
+        seen_keys = {item["key"] for item in schema}
+        for skill in agent.skill_manager.skills:
+            for req in skill.required_config:
+                if req not in seen_keys:
+                    schema.append({
+                        "key": req,
+                        "type": "string",
+                        "default": "",
+                        "category": "Skill: " + skill.name,
+                        "description": f"Required for {skill.name}"
+                    })
+                    seen_keys.add(req)
+
+    return schema
+
+
+def interactive_config_ui(agent=None):
+    """
+    Interactive configuration UI with arrow key navigation and tabs.
+    Use Tab/Shift+Tab to switch tabs, ↑/↓ to navigate, ←/→ to toggle, Enter to edit.
+    """
+    from prompt_toolkit import Application
+    from prompt_toolkit.layout import Layout, HSplit, Window, WindowAlign
+    from prompt_toolkit.layout.controls import FormattedTextControl
+    from prompt_toolkit.layout.dimension import Dimension
+    from prompt_toolkit.key_binding import KeyBindings
+
+    config = load_config()
+    schema = get_config_schema(agent)
+
+    # Initialize config with defaults if missing
+    for item in schema:
+        if item["key"] not in config:
+            config[item["key"]] = item["default"]
+
+    # Store original config with defaults for comparison
+    original_config = config.copy()
+
+    # Tab state
+    current_tab = 0  # 0 = Settings, 1 = Skills
+    tabs = ["Settings", "Skills"]
+
+    # Settings tab state
+    settings_selected_index = 0
+
+    # Skills tab state
+    skills_selected_index = 0
+    skills = []
+    if agent:
+        skills = agent.skill_manager.skills
+
+    # Load skill enabled states from config
+    skill_enabled = {}
+    for skill in skills:
+        config_key = f"SKILL_{skill.name.upper().replace(' ', '_')}_ENABLED"
+        if config_key in config:
+            skill.enabled = config[config_key]
+        skill_enabled[skill.name] = skill.enabled
+
+    def get_display_value(item):
+        """Get formatted value for display."""
+        value = config.get(item["key"], item["default"])
+        if item["type"] == "boolean":
+            return "ON" if value else "OFF"
+        elif item["type"] == "secret" and value:
+            return "*" * 8
+        elif item["type"] == "choice":
+            return str(value)
+        else:
+            return str(value) if value else "(not set)"
+
+    def get_tabs_text():
+        """Build the tab bar text."""
+        result = []
+        for i, tab_name in enumerate(tabs):
+            if i == current_tab:
+                result.append(("bold reverse", f" {tab_name} "))
+            else:
+                result.append(("", f" {tab_name} "))
+            if i < len(tabs) - 1:
+                result.append(("", "  "))
+        return to_formatted_text(result)
+
+    def get_settings_text():
+        """Build the formatted text for the settings tab."""
+        result = []
+        result.append(("bold", "Collig Configuration Manager\n\n"))
+
+        # Group by category
+        categories = {}
+        for item in schema:
+            cat = item["category"]
+            if cat not in categories:
+                categories[cat] = []
+            categories[cat].append(item)
+
+        # Build the list with categories
+        current_index = 0
+        for cat, items in categories.items():
+            result.append(("bold cyan", f"  {cat}\n"))
+            for item in items:
+                prefix = "> " if current_index == settings_selected_index else "  "
+                value = get_display_value(item)
+
+                if current_index == settings_selected_index:
+                    result.append(("bold cyan", f"{prefix}{item['key']}: "))
+                    result.append(("bold reverse", f" {value} "))
+                    result.append(("", f"  {item['description']}\n"))
+                else:
+                    result.append(("", f"{prefix}{item['key']}: {value}  {item['description']}\n"))
+                current_index += 1
+
+        return to_formatted_text(result)
+
+    def get_skills_text():
+        """Build the formatted text for the skills tab."""
+        result = []
+        result.append(("bold", "Skill Management\n\n"))
+
+        if not skills:
+            result.append(("dim", "  No skills available.\n"))
+        else:
+            for i, skill in enumerate(skills):
+                prefix = "> " if i == skills_selected_index else "  "
+                enabled = skill_enabled.get(skill.name, True)
+                status = "[X]" if enabled else "[ ]"
+
+                if i == skills_selected_index:
+                    result.append(("bold cyan", f"{prefix}"))
+                    result.append(("bold reverse", f" {status} "))
+                    result.append(("", f" {skill.name}\n"))
+                    result.append(("dim", f"      {skill.description}\n"))
+                else:
+                    result.append(("", f"{prefix}{status} {skill.name}\n"))
+
+        return to_formatted_text(result)
+
+    def get_footer_text():
+        """Get the footer help text."""
+        if current_tab == 0:
+            return to_formatted_text([("dim", "[Tab] Switch Tabs  [↑/↓] Navigate  [←/→] Toggle  [Enter] Edit  [s] Save  [q] Quit")])
+        else:
+            return to_formatted_text([("dim", "[Tab] Switch Tabs  [↑/↓] Navigate  [←/→] Toggle  [s] Save  [q] Quit")])
+
+    def get_content_text():
+        """Get the main content text based on current tab."""
+        if current_tab == 0:
+            return get_settings_text()
+        else:
+            return get_skills_text()
+
+    def save_config_and_update():
+        """Save config and update environment variables."""
+        # Save skill enabled states
+        for skill in skills:
+            config_key = f"SKILL_{skill.name.upper().replace(' ', '_')}_ENABLED"
+            config[config_key] = skill_enabled.get(skill.name, True)
+            skill.enabled = skill_enabled.get(skill.name, True)
+
+        save_config(config)
+
+        # Update environment variables for API keys
+        for item in schema:
+            if item["type"] == "secret" and item["key"] in config:
+                os.environ[item["key"]] = config[item["key"]]
+                if item["key"].endswith("_API_KEY"):
+                    env_file = ".env"
+                    if os.path.exists(env_file):
+                        set_key(env_file, item["key"], config[item["key"]])
+
+        # Update agent with new provider/model if changed
+        if agent is not None:
+            new_provider = config.get("LLM_PROVIDER")
+            new_model = config.get("LLM_MODEL")
+            if new_provider and (new_provider != original_config.get("LLM_PROVIDER") or new_model != original_config.get("LLM_MODEL")):
+                agent.set_provider(new_provider, new_model)
+
+            # Reinitialize agent with updated enabled skills
+            agent._init_langchain_agent()
+
+        return True
+
+    def has_changes():
+        """Check if there are unsaved changes."""
+        current_config = load_config()
+
+        # Check settings changes
+        for key in config:
+            if current_config.get(key) != config.get(key):
+                return True
+
+        # Check skill changes
+        for skill in skills:
+            config_key = f"SKILL_{skill.name.upper().replace(' ', '_')}_ENABLED"
+            if current_config.get(config_key, True) != skill_enabled.get(skill.name, True):
+                return True
+
+        return False
+
+    kb = KeyBindings()
+
+    @kb.add("tab")
+    def next_tab(event):
+        nonlocal current_tab
+        current_tab = (current_tab + 1) % len(tabs)
+        tabs_control.text = get_tabs_text()
+        content_control.text = get_content_text()
+        footer_control.text = get_footer_text()
+
+    @kb.add("s-tab")
+    def prev_tab(event):
+        nonlocal current_tab
+        current_tab = (current_tab - 1) % len(tabs)
+        tabs_control.text = get_tabs_text()
+        content_control.text = get_content_text()
+        footer_control.text = get_footer_text()
+
+    @kb.add("up")
+    def move_up(event):
+        nonlocal settings_selected_index, skills_selected_index
+        if current_tab == 0:
+            settings_selected_index = (settings_selected_index - 1) % len(schema)
+        else:
+            if skills:
+                skills_selected_index = (skills_selected_index - 1) % len(skills)
+        content_control.text = get_content_text()
+
+    @kb.add("down")
+    def move_down(event):
+        nonlocal settings_selected_index, skills_selected_index
+        if current_tab == 0:
+            settings_selected_index = (settings_selected_index + 1) % len(schema)
+        else:
+            if skills:
+                skills_selected_index = (skills_selected_index + 1) % len(skills)
+        content_control.text = get_content_text()
+
+    @kb.add("left")
+    def toggle_left(event):
+        """Toggle boolean or cycle choice left."""
+        if current_tab == 0:
+            item = schema[settings_selected_index]
+            if item["type"] == "boolean":
+                config[item["key"]] = not config.get(item["key"], item["default"])
+            elif item["type"] == "choice":
+                current = config.get(item["key"], item["default"])
+                options = item["options"]
+                try:
+                    idx = options.index(current)
+                    new_idx = (idx - 1) % len(options)
+                    config[item["key"]] = options[new_idx]
+                except ValueError:
+                    config[item["key"]] = options[0]
+        else:
+            if skills:
+                skill = skills[skills_selected_index]
+                skill_enabled[skill.name] = not skill_enabled.get(skill.name, True)
+        content_control.text = get_content_text()
+
+    @kb.add("right")
+    def toggle_right(event):
+        """Toggle boolean or cycle choice right."""
+        if current_tab == 0:
+            item = schema[settings_selected_index]
+            if item["type"] == "boolean":
+                config[item["key"]] = not config.get(item["key"], item["default"])
+            elif item["type"] == "choice":
+                current = config.get(item["key"], item["default"])
+                options = item["options"]
+                try:
+                    idx = options.index(current)
+                    new_idx = (idx + 1) % len(options)
+                    config[item["key"]] = options[new_idx]
+                except ValueError:
+                    config[item["key"]] = options[0]
+        else:
+            if skills:
+                skill = skills[skills_selected_index]
+                skill_enabled[skill.name] = not skill_enabled.get(skill.name, True)
+        content_control.text = get_content_text()
+
+    @kb.add("enter")
+    def edit_value(event):
+        """Edit string or secret value (only in settings tab)."""
+        if current_tab == 0:
+            item = schema[settings_selected_index]
+            if item["type"] in ["string", "secret"]:
+                # Exit the main app to show input dialog
+                event.app.exit(result=("edit", item))
+
+    @kb.add("s")
+    def save(event):
+        """Save configuration."""
+        save_config_and_update()
+        event.app.exit(result=("saved",))
+
+    @kb.add("q")
+    @kb.add("escape")
+    @kb.add("c-c")
+    def quit(event):
+        """Quit without saving (prompt if changes)."""
+        if has_changes():
+            event.app.exit(result=("confirm_quit",))
+        else:
+            event.app.exit(result=("quit",))
+
+    # Create UI components
+    tabs_control = FormattedTextControl(text=get_tabs_text())
+    tabs_window = Window(content=tabs_control, height=1, align=WindowAlign.CENTER)
+
+    content_control = FormattedTextControl(text=get_content_text())
+    content_window = Window(
+        content=content_control,
+        width=Dimension(min=60, preferred=80),
+        height=Dimension(min=15, preferred=22),
+        align=WindowAlign.LEFT
+    )
+
+    footer_control = FormattedTextControl(text=get_footer_text())
+    footer_window = Window(content=footer_control, height=1)
+
+    layout = Layout(HSplit([tabs_window, content_window, footer_window]))
+    app = Application(layout=layout, key_bindings=kb, full_screen=False)
+
+    while True:
+        result = app.run()
+
+        if not result:
+            break
+
+        if result[0] == "edit":
+            item = result[1]
+            current_value = config.get(item["key"], item["default"])
+            is_password = item["type"] == "secret"
+            try:
+                new_value = prompt(
+                    message=f"Enter {item['key']}: ",
+                    default=str(current_value),
+                    is_password=is_password
+                )
+                if new_value is not None:
+                    config[item["key"]] = new_value
+                content_control.text = get_content_text()
+            except:
+                pass
+
+        elif result[0] == "saved":
+            console.print("[green]Configuration saved successfully![/green]")
+            break
+
+        elif result[0] == "confirm_quit":
+            if Confirm.ask("You have unsaved changes. Save before quitting?"):
+                save_config_and_update()
+                console.print("[green]Configuration saved![/green]")
+            break
+
+        elif result[0] == "quit":
+            break
+
 
 def handle_config_command(command_parts, agent=None):
     """
     Handles configuration commands:
+    - config (interactive UI)
     - config list
     - config set [key] [value]
     """
     if len(command_parts) < 2:
+        # Launch interactive UI
+        try:
+            interactive_config_ui(agent)
+            return
+        except Exception as e:
+            console.print(f"[dim]Interactive config failed: {e}, falling back to basic mode.[/dim]")
+            # Fall through to basic help
+
+    if len(command_parts) < 2:
         console.print("[bold]Configuration Manager[/bold]")
         console.print("Usage:")
-        console.print("  config list              - Show current configuration")
-        console.print("  config set [key] [value] - Set a configuration value")
+        console.print("  config                    - Interactive configuration UI")
+        console.print("  config list               - Show current configuration")
+        console.print("  config set [key] [value]  - Set a configuration value")
 
         if agent:
             console.print("\n[bold]Available Configuration Options:[/bold]")
@@ -220,6 +948,17 @@ def handle_config_command(command_parts, agent=None):
             set_key(env_file, key, value)
             os.environ[key] = value
             console.print(f"[green]Environment variable {key} updated.[/green]")
+
+        # If setting provider or model, update the agent immediately
+        if agent is not None and (key == "LLM_PROVIDER" or key == "LLM_MODEL"):
+            provider = config.get("LLM_PROVIDER", agent.llm_provider)
+            model = config.get("LLM_MODEL", agent.llm_model)
+            if key == "LLM_PROVIDER":
+                provider = value
+            else:
+                model = value
+            agent.set_provider(provider, model)
+            console.print(f"[green]Agent updated to use {provider} ({model})[/green]")
 
         # Reload agent with new config?
         # Ideally, we should restart or trigger a reload, but for now user might need to restart.
@@ -321,8 +1060,16 @@ def main():
         start_time = time_module.time()
         console.print("[dim]Importing skills...[/dim]")
         from agent import agent
+        from skills.menu import set_menu_functions
+        from skills.news import NewsSkill
         import_time = time_module.time() - start_time
         console.print(f"[dim]Agent imported in {import_time:.2f}s[/dim]")
+
+        # Set the menu functions for the MenuSkill
+        set_menu_functions(interactive_select, interactive_menu)
+
+        # Set the news functions for the NewsSkill
+        set_news_functions(NewsSkill.get_news_cache, NewsSkill.get_last_query)
 
         # Newline after the overwriting registration logs
         print()
@@ -333,6 +1080,9 @@ def main():
         config = load_config()
         config_time = time_module.time() - config_start
         console.print(f"[dim]Configuration loaded in {config_time:.2f}s[/dim]")
+
+        # Initialize markdown preference
+        ENABLE_MARKDOWN = config.get("ENABLE_MARKDOWN", True)
 
         skills_start = time_module.time()
         console.print("[dim]Configuring skills...[/dim]")
@@ -382,7 +1132,9 @@ def main():
 
     console.print("[bold blue]Collig Co-worker AI - CLI Mode[/bold blue]")
     console.print("Type [bold yellow]/[/bold yellow] to see available commands.")
-    console.print("Type [bold yellow]'exit'[/bold yellow] or [bold yellow]'quit'[/bold yellow] to end the session.\n")
+    console.print("Type [bold yellow]'exit'[/bold yellow] or [bold yellow]'quit'[/bold yellow] to end the session.")
+    console.print("Press [bold yellow]Esc[/bold yellow] or [bold yellow]Ctrl+C[/bold yellow] to cancel current operation.")
+    console.print("Use [bold yellow]/toggle markdown[/bold yellow] to enable/disable markdown formatting.\n")
 
     while True:
         try:
@@ -472,6 +1224,21 @@ def main():
                 handle_restore_command(user_input.split())
                 continue
 
+            if user_input.startswith("news"):
+                try:
+                    from skills.news import NewsSkill
+                    news_cache = NewsSkill.get_news_cache()
+                    if news_cache:
+                        news_query = NewsSkill.get_last_query()
+                        news_action = interactive_news_menu(news_cache, news_query)
+                        if news_action:
+                            handle_news_action(news_action, agent)
+                    else:
+                        console.print("[yellow]No news items available. Try searching for news first![/yellow]")
+                except Exception as e:
+                    console.print(f"[red]Error opening news menu: {e}[/red]")
+                continue
+
             if user_input.startswith("provider"):
                 parts = user_input.split()
                 if len(parts) < 2:
@@ -510,12 +1277,169 @@ def main():
                 console.print(f"[green]{msg}[/green]")
                 continue
 
+            if user_input.lower().startswith("toggle markdown"):
+                ENABLE_MARKDOWN = not ENABLE_MARKDOWN
+                status = "enabled" if ENABLE_MARKDOWN else "disabled"
+
+                # Save to config
+                config = load_config()
+                config["ENABLE_MARKDOWN"] = ENABLE_MARKDOWN
+                save_config(config)
+
+                console.print(f"[green]Markdown rendering {status}.[/green]")
+                continue
+
+            if user_input.lower().startswith("stats"):
+                # Parse command: /stats [session|overall]
+                parts = user_input.lower().split()
+                mode = "both"  # default: show both
+                if len(parts) > 1:
+                    if parts[1] in ["session", "sess"]:
+                        mode = "session"
+                    elif parts[1] in ["overall", "all", "total"]:
+                        mode = "overall"
+
+                from datetime import datetime
+
+                # Function to render a stats bar
+                def render_bar(prompt_tokens, completion_tokens, total_tokens, width=40):
+                    if total_tokens <= 0:
+                        return " " * width
+                    prompt_pct = prompt_tokens / total_tokens
+                    completion_pct = completion_tokens / total_tokens
+                    prompt_chars = int(width * prompt_pct)
+                    completion_chars = int(width * completion_pct)
+                    # Ensure at least something shows if we have tokens
+                    if prompt_chars == 0 and prompt_tokens > 0:
+                        prompt_chars = 1
+                    if completion_chars == 0 and completion_tokens > 0:
+                        completion_chars = 1
+                    # Adjust to fit
+                    while prompt_chars + completion_chars > width:
+                        if completion_chars > 1:
+                            completion_chars -= 1
+                        elif prompt_chars > 1:
+                            prompt_chars -= 1
+                    return (
+                        "[cyan]" + "█" * prompt_chars + "[/cyan]" +
+                        "[green]" + "█" * completion_chars + "[/green]" +
+                        " " * (width - prompt_chars - completion_chars)
+                    ), prompt_pct, completion_pct
+
+                sections = []
+
+                # Session Stats Section
+                if mode in ["both", "session"]:
+                    session_stats = agent.get_token_stats(session_id)
+                    if session_stats:
+                        try:
+                            first_ts = datetime.fromisoformat(session_stats["first_interaction"])
+                            last_ts = datetime.fromisoformat(session_stats["last_interaction"])
+                            first_str = first_ts.strftime("%b %d, %H:%M")
+                            last_str = last_ts.strftime("%b %d, %H:%M")
+                            # Calculate session duration
+                            duration = last_ts - first_ts
+                            hours, remainder = divmod(duration.total_seconds(), 3600)
+                            minutes, _ = divmod(remainder, 60)
+                            if hours > 24:
+                                days = int(hours // 24)
+                                hours = int(hours % 24)
+                                duration_str = f"{days}d {hours}h {int(minutes)}m"
+                            else:
+                                duration_str = f"{int(hours)}h {int(minutes)}m"
+                        except:
+                            first_str = session_stats["first_interaction"]
+                            last_str = session_stats["last_interaction"]
+                            duration_str = "unknown"
+
+                        total_tokens = session_stats['total_tokens']
+                        prompt_tokens = session_stats['total_prompt_tokens']
+                        completion_tokens = session_stats['total_completion_tokens']
+                        bar, prompt_pct, completion_pct = render_bar(prompt_tokens, completion_tokens, total_tokens)
+
+                        session_section = f"""  [bold cyan]Session Stats[/bold cyan]  [dim]────────────────────────────────────────────────[/dim]
+
+  [bold]Session[/bold]:      {session_stats['session_id'][:8]}...
+  [bold]Interactions[/bold]: {session_stats['interaction_count']}
+  [bold]Duration[/bold]:     {duration_str}
+  [bold]First[/bold]:        {first_str}
+  [bold]Last[/bold]:         {last_str}
+
+  {bar}
+  [cyan]◯ Request[/cyan]  {prompt_tokens:>12,}  [dim]{prompt_pct*100:.0f}%[/dim]
+  [green]◯ Response[/green] {completion_tokens:>12,}  [dim]{completion_pct*100:.0f}%[/dim]
+  [bold white]● Total[/bold white]    {total_tokens:>12,}
+
+  [cyan]Request[/cyan]:   {session_stats['avg_prompt_tokens']:>8,} tokens  [dim]avg per interaction[/dim]
+  [green]Response[/green]:  {session_stats['avg_completion_tokens']:>8,} tokens  [dim]avg per interaction[/dim]
+  [bold white]Total[/bold white]:     {session_stats['avg_total_tokens']:>8,} tokens  [dim]avg per interaction[/dim]
+"""
+                        sections.append(session_section)
+
+                # Overall Stats Section
+                if mode in ["both", "overall"]:
+                    overall_stats = agent.get_overall_token_stats()
+                    if overall_stats:
+                        try:
+                            first_ts = datetime.fromisoformat(overall_stats["first_interaction"])
+                            last_ts = datetime.fromisoformat(overall_stats["last_interaction"])
+                            first_str = first_ts.strftime("%b %d, %Y")
+                            last_str = last_ts.strftime("%b %d, %Y")
+                            # Calculate overall duration
+                            duration = last_ts - first_ts
+                            duration_str = f"{duration.days} days"
+                        except:
+                            first_str = overall_stats["first_interaction"]
+                            last_str = overall_stats["last_interaction"]
+                            duration_str = "unknown"
+
+                        total_tokens = overall_stats['total_tokens']
+                        prompt_tokens = overall_stats['total_prompt_tokens']
+                        completion_tokens = overall_stats['total_completion_tokens']
+                        bar, prompt_pct, completion_pct = render_bar(prompt_tokens, completion_tokens, total_tokens)
+
+                        overall_section = f"""  [bold yellow]Overall Stats[/bold yellow]  [dim]─────────────────────────────────────────────[/dim]
+
+  [bold]Sessions[/bold]:     {overall_stats['total_sessions']}
+  [bold]Interactions[/bold]: {overall_stats['total_interactions']}
+  [bold]Period[/bold]:       {first_str} - {last_str}
+  [bold]Duration[/bold]:     {duration_str}
+
+  {bar}
+  [cyan]◯ Request[/cyan]  {prompt_tokens:>12,}  [dim]{prompt_pct*100:.0f}%[/dim]
+  [green]◯ Response[/green] {completion_tokens:>12,}  [dim]{completion_pct*100:.0f}%[/dim]
+  [bold white]● Total[/bold white]    {total_tokens:>12,}
+
+  [bold white]Per Session (avg):[/bold white]
+  [cyan]Request[/cyan]:   {overall_stats['avg_prompt_per_session']:>8,} tokens
+  [green]Response[/green]:  {overall_stats['avg_completion_per_session']:>8,} tokens
+  [bold white]Total[/bold white]:     {overall_stats['avg_total_per_session']:>8,} tokens
+
+  [bold white]Per Interaction (avg):[/bold white]
+  [cyan]Request[/cyan]:   {overall_stats['avg_prompt_per_interaction']:>8,} tokens
+  [green]Response[/green]:  {overall_stats['avg_completion_per_interaction']:>8,} tokens
+  [bold white]Total[/bold white]:     {overall_stats['avg_total_per_interaction']:>8,} tokens
+"""
+                        sections.append(overall_section)
+
+                if not sections:
+                    console.print(Panel("No token usage data yet. Start a conversation!", title="Token Statistics", border_style="dim"))
+                else:
+                    # Join sections with a divider
+                    divider = "\n  [dim]────────────────────────────────────────────────────────────[/dim]\n"
+                    full_content = divider.join(sections)
+                    header = "  [bold white]Token Statistics[/bold white]  [dim]────────────────────────────────────────────[/dim]\n"
+                    footer = "\n  [dim]Use /stats session or /stats overall to see only one section[/dim]"
+                    console.print(Panel(header + full_content + footer, border_style="cyan", padding=(0, 2)))
+                continue
+
             if user_input.startswith("status"):
                 console.print(Panel(f"[bold]System Status[/bold]\nChecking connection to {agent.llm_provider}...", title="Status Check"))
 
                 # Check 1: Provider Config
                 console.print(f"• Provider: [cyan]{agent.llm_provider}[/cyan]")
                 console.print(f"• Model: [cyan]{agent.llm_model}[/cyan]")
+                console.print(f"• Markdown: {'[green]enabled[/green]' if ENABLE_MARKDOWN else '[yellow]disabled[/yellow]'}")
 
                 # Check 2: API Key / Connection
                 status = "[green]OK[/green]"
@@ -555,7 +1479,7 @@ def main():
                     else:
                         api_key_source = source
                         api_key_preview = api_key[:10] + "..." + api_key[-4:] if len(api_key) > 14 else "***"
-                elif agent.llm_provider == "llama":
+                elif agent.llm_provider == "ollama" or agent.llm_provider == "llama":
                     # Check if ollama is running
                     import subprocess
                     try:
@@ -609,7 +1533,7 @@ def main():
                     if not os.getenv("DEEPSEEK_API_KEY"):
                         status = "[red]MISSING API KEY[/red]"
                         error_msg = "Please set DEEPSEEK_API_KEY in .env or via '/config set'"
-                elif agent.llm_provider == "llama":
+                elif agent.llm_provider == "ollama" or agent.llm_provider == "llama":
                     # Check if ollama is running
                     import subprocess
                     try:
@@ -660,43 +1584,76 @@ def main():
                     skill.configure(new_config)
                 continue
 
-            with console.status("[bold yellow]Thinking...[/bold yellow]"):
-                result = agent.process_message(user_input, session_id=session_id)
+            # Inner try-except for agent processing - can be interrupted with Ctrl+C
+            result = None
+            try:
+                with console.status("[bold yellow]Thinking...[/bold yellow]"):
+                    result = agent.process_message(user_input, session_id=session_id)
+            except KeyboardInterrupt:
+                console.print("\n[yellow]Operation cancelled. Returning to prompt...[/yellow]\n")
+                continue
 
-            response = result["response"]
-            action = result["action"]
-            data = result.get("data", {})
+            if result:
+                response = result["response"]
+                action = result["action"]
+                data = result.get("data", {})
 
-            # Check if response contains markdown formatting
-            if "**" in response or "#" in response or "[" in response:
-                # Render as markdown
-                console.print("[bold blue]Collig:[/bold blue]")
+                # Check if response contains markdown formatting
+                markdown_patterns = ["**", "#", "[", "- ", "1.", "```", "___"]
+                if ENABLE_MARKDOWN and any(pattern in response for pattern in markdown_patterns):
+                    # Render as markdown
+                    console.print("[bold blue]Collig:[/bold blue]")
+                    try:
+                        console.print(Markdown(response))
+                    except Exception:
+                        # Fallback to plain text if markdown rendering fails
+                        console.print(response)
+                else:
+                    # Render as plain text
+                    console.print(f"[bold blue]Collig:[/bold blue] {response}")
+
+                # Show token usage statistics
+                prompt_tokens = result.get("prompt_tokens", 0)
+                completion_tokens = result.get("completion_tokens", 0)
+                total_tokens = result.get("total_tokens", 0)
+                if prompt_tokens > 0 or completion_tokens > 0:
+                    console.print(f"[dim](Request: {prompt_tokens}, Response: {completion_tokens}, Total: {total_tokens})[/dim]")
+
+                if action:
+                    console.print(f"[dim italic]Action triggered: {action}[/dim italic]")
+
+                    # Handle specific actions
+                    if action == "open_url":
+                        url = data.get("url")
+                        if url:
+                            import webbrowser
+                            try:
+                                webbrowser.open(url)
+                                console.print(f"[green]Creating browser tab for: {url}[/green]")
+                            except Exception as e:
+                                console.print(f"[red]Failed to open browser: {e}[/red]")
+
+                # Check if news was just searched - offer interactive menu
                 try:
-                    console.print(Markdown(response))
-                except Exception:
-                    # Fallback to plain text if markdown rendering fails
-                    console.print(response)
-            else:
-                # Render as plain text
-                console.print(f"[bold blue]Collig:[/bold blue] {response}")
+                    from skills.news import NewsSkill
+                    if NewsSkill.has_just_searched():
+                        NewsSkill.clear_search_flag()
+                        news_cache = NewsSkill.get_news_cache()
+                        if news_cache:
+                            console.print()
+                            if Confirm.ask("[bold cyan]📰 Open interactive news browser?[/bold cyan]", default=True):
+                                news_query = NewsSkill.get_last_query()
+                                news_action = interactive_news_menu(news_cache, news_query)
+                                if news_action:
+                                    handle_news_action(news_action, agent)
+                except Exception as e:
+                    # If news menu fails, just continue quietly
+                    pass
 
-            if action:
-                console.print(f"[dim italic]Action triggered: {action}[/dim italic]")
-
-                # Handle specific actions
-                if action == "open_url":
-                    url = data.get("url")
-                    if url:
-                        import webbrowser
-                        try:
-                            webbrowser.open(url)
-                            console.print(f"[green]Creating browser tab for: {url}[/green]")
-                        except Exception as e:
-                            console.print(f"[red]Failed to open browser: {e}[/red]")
-
-            console.print() # Empty line for spacing
+                console.print() # Empty line for spacing
 
         except KeyboardInterrupt:
+            # Double Ctrl+C to exit
             console.print("\n[bold blue]Collig:[/bold blue] Goodbye!")
             break
         except Exception as e:
