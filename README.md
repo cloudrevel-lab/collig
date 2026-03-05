@@ -1,4 +1,4 @@
-![Collig Banner](assets/banner.svg)
+![Collig Banner](assets/banner.png)
 
 # Collig: Your Intelligent AI Co-worker
 
