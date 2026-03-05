@@ -52,6 +52,9 @@ class SkillCommandCompleter(Completer):
             ("restore", "Restore user data from a zip file"),
             ("provider", "Switch LLM provider (openai/ollama/llama/deepseek)"),
             ("news", "Open interactive news browser (if news was searched)"),
+            ("news cached", "Browse saved news searches"),
+            ("news history", "Browse saved news searches"),
+            ("news saved", "Browse saved news searches"),
             ("status", "Check system status and LLM connection"),
             ("stats", "Show token usage statistics (session + overall)"),
             ("stats session", "Show token usage for current session"),
@@ -215,6 +218,13 @@ def set_news_functions(get_cache_func, get_query_func):
     }
 
 
+# Import news cache system
+try:
+    from core.news_cache import get_news_cache_manager
+except ImportError:
+    pass
+
+
 def interactive_news_menu(news_items: list, query: str = "") -> dict:
     """
     Display an interactive news menu with navigation and actions.
@@ -237,6 +247,7 @@ def interactive_news_menu(news_items: list, query: str = "") -> dict:
 
     selected_index = 0
     mode = "list"  # "list" or "detail"
+    last_action = None
 
     def truncate_text(text: str, max_len: int = 60) -> str:
         if not text:
@@ -271,7 +282,7 @@ def interactive_news_menu(news_items: list, query: str = "") -> dict:
                 result.append(("", line + "\n"))
 
         result.append(("", "\n"))
-        result.append(("dim", "[↑/↓] Navigate  [Enter] Read  [o] Open  [c] Cache All  [Esc] Quit"))
+        result.append(("dim", "[↑/↓/k/j] Navigate  [Enter] Read  [o] Open  [Esc] Quit"))
         return to_formatted_text(result)
 
     def get_detail_text():
@@ -296,6 +307,7 @@ def interactive_news_menu(news_items: list, query: str = "") -> dict:
     kb = KeyBindings()
 
     @kb.add("up")
+    @kb.add("k")
     def move_up(event):
         nonlocal selected_index
         if mode == "list":
@@ -303,6 +315,7 @@ def interactive_news_menu(news_items: list, query: str = "") -> dict:
             menu_control.text = get_list_text()
 
     @kb.add("down")
+    @kb.add("j")
     def move_down(event):
         nonlocal selected_index
         if mode == "list":
@@ -325,16 +338,19 @@ def interactive_news_menu(news_items: list, query: str = "") -> dict:
 
     @kb.add("o")
     def open_url(event):
+        nonlocal last_action
         item = news_items[selected_index]
         url = item.get('url')
         if url and url != '#':
-            event.app.exit(result={"action": "open", "url": url, "index": selected_index})
+            import webbrowser
+            try:
+                webbrowser.open(url)
+                console.print(f"[green]Opening: {url}[/green]")
+                last_action = {"action": "open", "url": url, "index": selected_index}
+            except Exception as e:
+                console.print(f"[red]Failed to open browser: {e}[/red]")
         else:
             console.print("[yellow]No URL available for this item[/yellow]")
-
-    @kb.add("c")
-    def cache_list(event):
-        event.app.exit(result={"action": "cache_all"})
 
     @kb.add("escape")
     @kb.add("q")
@@ -357,10 +373,10 @@ def interactive_news_menu(news_items: list, query: str = "") -> dict:
 
     try:
         result = app.run()
-        return result
+        return result if result is not None else last_action
     except Exception as e:
         console.print(f"[dim]News menu error: {e}[/dim]")
-        return None
+        return last_action
 
 
 def handle_news_action(action_result: dict, agent):
@@ -379,18 +395,6 @@ def handle_news_action(action_result: dict, agent):
                 console.print(f"[green]Opening: {url}[/green]")
             except Exception as e:
                 console.print(f"[red]Failed to open browser: {e}[/red]")
-
-    elif action == "cache_all":
-        console.print("[dim]Caching all news items...[/dim]")
-        try:
-            # Find and call the cache_news_list tool
-            for tool in agent.tools:
-                if tool.name == "cache_news_list":
-                    result = tool.invoke({})
-                    console.print(f"[green]{result}[/green]")
-                    break
-        except Exception as e:
-            console.print(f"[red]Failed to cache: {e}[/red]")
 
 
 def load_config():
@@ -663,7 +667,7 @@ def interactive_config_ui(agent=None):
         if current_tab == 0:
             return to_formatted_text([("dim", "[Tab] Switch Tabs  [↑/↓] Navigate  [←/→] Toggle  [Enter] Edit  [s] Save  [q] Quit")])
         else:
-            return to_formatted_text([("dim", "[Tab] Switch Tabs  [↑/↓] Navigate  [←/→] Toggle  [s] Save  [q] Quit")])
+            return to_formatted_text([("dim", "[Tab] Switch Tabs  [↑/↓] Navigate  [←/→/Space] Toggle  [s] Save  [q] Quit")])
 
     def get_content_text():
         """Get the main content text based on current tab."""
@@ -674,11 +678,17 @@ def interactive_config_ui(agent=None):
 
     def save_config_and_update():
         """Save config and update environment variables."""
-        # Save skill enabled states
-        for skill in skills:
-            config_key = f"SKILL_{skill.name.upper().replace(' ', '_')}_ENABLED"
-            config[config_key] = skill_enabled.get(skill.name, True)
-            skill.enabled = skill_enabled.get(skill.name, True)
+        # Save skill enabled states - use agent's skill manager directly
+        skill_changes = []
+        if agent is not None:
+            for skill in agent.skill_manager.skills:
+                config_key = f"SKILL_{skill.name.upper().replace(' ', '_')}_ENABLED"
+                new_state = skill_enabled.get(skill.name, True)
+                old_state = config.get(config_key, True)
+                if old_state != new_state:
+                    skill_changes.append(f"{skill.name}: {'enabled' if new_state else 'disabled'}")
+                config[config_key] = new_state
+                skill.enabled = new_state
 
         save_config(config)
 
@@ -700,6 +710,13 @@ def interactive_config_ui(agent=None):
 
             # Reinitialize agent with updated enabled skills
             agent._init_langchain_agent()
+
+            # Show what changed
+            if skill_changes:
+                console.print("[dim]  Skills updated:[/dim]")
+                for change in skill_changes:
+                    console.print(f"[dim]    - {change}[/dim]")
+                console.print(f"[dim]  Loaded {len(agent.tools)} tools[/dim]")
 
         return True
 
@@ -801,6 +818,14 @@ def interactive_config_ui(agent=None):
                 skill = skills[skills_selected_index]
                 skill_enabled[skill.name] = not skill_enabled.get(skill.name, True)
         content_control.text = get_content_text()
+
+    @kb.add("space")
+    def toggle_space(event):
+        """Toggle with space bar (skills tab only)."""
+        if current_tab == 1 and skills:
+            skill = skills[skills_selected_index]
+            skill_enabled[skill.name] = not skill_enabled.get(skill.name, True)
+            content_control.text = get_content_text()
 
     @kb.add("enter")
     def edit_value(event):
@@ -1020,14 +1045,12 @@ def print_banner():
     fixed_lines = [""] * 6
 
     with Live(console=console, refresh_per_second=60, transient=False) as live:
+        # Fast banner animation - much quicker!
         for letter_lines in letters:
-            w = len(letter_lines[0])
-            for pad in range(terminal_width - len(fixed_lines[0]), 0, -5):
-                live.update(Text('\n'.join(fixed_lines[i] + ' ' * pad + letter_lines[i]
-                                         for i in range(6)), style="bold #C56F52"))
-                time.sleep(0.005)
             for i in range(6):
                 fixed_lines[i] += letter_lines[i]
+            # Update display as each letter arrives
+            live.update(Text('\n'.join(fixed_lines[i] for i in range(6)), style="bold #C56F52"))
 
         # Final update to ensure everything is clean
         final_text = Text()
@@ -1035,14 +1058,9 @@ def print_banner():
             final_text.append(line + "\n", style="bold #C56F52")
         live.update(final_text)
 
-    # Typing animation for the tagline
+    # Show tagline without animation for faster startup
     tagline = "Your AI Assistant for Life & Work"
-
-    # Use console.print char-by-char with style to avoid markup nesting errors
-    for char in tagline:
-        console.print(char, style="italic dim", end="")
-        time.sleep(0.05)
-    console.print() # Newline after animation
+    console.print(tagline, style="italic dim")
 
 def main():
     parser = argparse.ArgumentParser(description="Collig CLI")
@@ -1054,16 +1072,12 @@ def main():
     if not check_setup():
         run_setup_wizard()
 
-    # Import agent AFTER setup to ensure env vars are loaded if agent relies on them at import time
+    # Import agent - much faster now without the tagline animation!
     try:
-        import time as time_module
-        start_time = time_module.time()
         console.print("[dim]Importing skills...[/dim]")
         from agent import agent
         from skills.menu import set_menu_functions
         from skills.news import NewsSkill
-        import_time = time_module.time() - start_time
-        console.print(f"[dim]Agent imported in {import_time:.2f}s[/dim]")
 
         # Set the menu functions for the MenuSkill
         set_menu_functions(interactive_select, interactive_menu)
@@ -1075,22 +1089,14 @@ def main():
         print()
 
         # Load and apply configuration to skills
-        config_start = time_module.time()
-        console.print("[dim]Loading configuration...[/dim]")
         config = load_config()
-        config_time = time_module.time() - config_start
-        console.print(f"[dim]Configuration loaded in {config_time:.2f}s[/dim]")
 
         # Initialize markdown preference
         ENABLE_MARKDOWN = config.get("ENABLE_MARKDOWN", True)
 
-        skills_start = time_module.time()
-        console.print("[dim]Configuring skills...[/dim]")
         agent.skill_manager.configure(config)
         for skill in agent.skill_manager.skills:
             skill.configure(config)
-        skills_time = time_module.time() - skills_start
-        console.print(f"[dim]Skills configured in {skills_time:.2f}s[/dim]")
 
     except Exception as e:
         console.print(f"[bold red]Failed to initialize agent:[/bold red] {e}")
@@ -1098,10 +1104,25 @@ def main():
 
     # Initialize prompt_toolkit session
     completer = SkillCommandCompleter(agent)
+
+    # Create key bindings
+    kb = KeyBindings()
+
+    # Bottom toolbar with hints
+    def get_bottom_toolbar():
+        return to_formatted_text([
+            ('bold', ' [Ctrl+C]'), ('', ' Stop Thinking  '),
+            ('bold', '[/]'), ('', ' Commands  '),
+            ('bold', '[↑/↓]'), ('', ' History  '),
+            ('bold', '[Tab]'), ('', ' Complete')
+        ], style='class:bottom-toolbar')
+
     pt_session = PromptSession(
         history=InMemoryHistory(),
         completer=completer,
-        complete_while_typing=True
+        complete_while_typing=True,
+        key_bindings=kb,
+        bottom_toolbar=get_bottom_toolbar
     )
 
     # Custom style for prompt_toolkit
@@ -1111,6 +1132,7 @@ def main():
         'completion-menu.completion.current': 'bg:#00aaaa #000000',
         'scrollbar.background': 'bg:#88aaaa',
         'scrollbar.button': 'bg:#222222',
+        'bottom-toolbar': 'bg:#222222 #aaaaaa',
     })
 
     session_id = args.session
@@ -1131,10 +1153,8 @@ def main():
         console.print(f"[bold cyan]New session started: {session_id}[/bold cyan]")
 
     console.print("[bold blue]Collig Co-worker AI - CLI Mode[/bold blue]")
-    console.print("Type [bold yellow]/[/bold yellow] to see available commands.")
     console.print("Type [bold yellow]'exit'[/bold yellow] or [bold yellow]'quit'[/bold yellow] to end the session.")
-    console.print("Press [bold yellow]Esc[/bold yellow] or [bold yellow]Ctrl+C[/bold yellow] to cancel current operation.")
-    console.print("Use [bold yellow]/toggle markdown[/bold yellow] to enable/disable markdown formatting.\n")
+    console.print("Press [bold yellow]Ctrl+C[/bold yellow] to cancel current operation while thinking.\n")
 
     while True:
         try:
@@ -1227,14 +1247,104 @@ def main():
             if user_input.startswith("news"):
                 try:
                     from skills.news import NewsSkill
+                    from core.news_cache import get_news_cache_manager
+
+                    parts = user_input.split()
+
+                    # Check if user wants to browse cached news
+                    if len(parts) > 1 and parts[1].lower() in ["cached", "history", "saved"]:
+                        # Browse cached news searches
+                        cache_mgr = get_news_cache_manager()
+                        searches = cache_mgr.get_all_searches()
+
+                        if not searches:
+                            console.print("[yellow]No cached news searches found. Search for news first![/yellow]")
+                            continue
+
+                        # Create menu for cached searches
+                        from core.menu import InteractiveMenu, MenuItem, MenuAction
+
+                        # Convert to menu items
+                        menu_items = []
+                        for entry in searches:
+                            menu_item = MenuItem(
+                                title=entry.query,
+                                subtitle=entry.timestamp[:16].replace("T", " "),
+                                data=entry,
+                                detail=f"Query: {entry.query}\nDate: {entry.timestamp}\nItems: {len(entry.news_items)} articles"
+                            )
+                            menu_items.append(menu_item)
+
+                        # Create menu
+                        cache_menu = InteractiveMenu(
+                            title="📰 Saved News Searches",
+                            subtitle="Select a search to load",
+                            items=menu_items,
+                            stay_open=True
+                        )
+
+                        # Add "Load" action
+                        def load_search_action(item: MenuItem, index: int):
+                            entry = item.data
+                            # Load the news into NewsSkill
+                            NewsSkill._news_cache = entry.news_items
+                            NewsSkill._last_query = entry.query
+                            NewsSkill._just_searched = True
+                            console.print(f"[green]Loaded: {entry.query}[/green]")
+                            # Open the news menu for this search
+                            try:
+                                while True:
+                                    news_action = interactive_news_menu(entry.news_items, entry.query)
+                                    if news_action:
+                                        handle_news_action(news_action, agent)
+                                    else:
+                                        break
+                            except Exception as e:
+                                console.print(f"[red]Error in news menu: {e}[/red]")
+
+                        cache_menu.add_action(MenuAction(
+                            key="l",
+                            label="Load",
+                            callback=load_search_action,
+                            modes=["list", "detail"]
+                        ))
+
+                        # Add "Delete" action
+                        def delete_search_action(item: MenuItem, index: int):
+                            entry = item.data
+                            if cache_mgr.delete_search(entry.cache_id):
+                                console.print(f"[yellow]Deleted: {entry.query}[/yellow]")
+                                # Remove from current menu items too
+                                cache_menu.items.pop(index)
+                                if cache_menu.selected_index >= len(cache_menu.items):
+                                    cache_menu.selected_index = max(0, len(cache_menu.items) - 1)
+
+                        cache_menu.add_action(MenuAction(
+                            key="d",
+                            label="Delete",
+                            callback=delete_search_action,
+                            modes=["list", "detail"]
+                        ))
+
+                        # Run the menu
+                        cache_menu.run()
+                        continue
+
+                    # Regular news menu for current search
                     news_cache = NewsSkill.get_news_cache()
                     if news_cache:
                         news_query = NewsSkill.get_last_query()
-                        news_action = interactive_news_menu(news_cache, news_query)
-                        if news_action:
-                            handle_news_action(news_action, agent)
+                        # Keep menu open until user quits
+                        while True:
+                            news_action = interactive_news_menu(news_cache, news_query)
+                            if news_action:
+                                handle_news_action(news_action, agent)
+                            else:
+                                # User quit the menu
+                                break
                     else:
                         console.print("[yellow]No news items available. Try searching for news first![/yellow]")
+                        console.print("[dim]Tip: Say 'list cached news' to browse saved searches[/dim]")
                 except Exception as e:
                     console.print(f"[red]Error opening news menu: {e}[/red]")
                 continue
@@ -1586,9 +1696,33 @@ def main():
 
             # Inner try-except for agent processing - can be interrupted with Ctrl+C
             result = None
+            response_buffer = []
+            response_started = False
+
+            def stream_callback(token, token_type):
+                nonlocal response_started, response_buffer
+                if token_type == "start":
+                    console.print("[bold blue]Collig:[/bold blue] ", end="")
+                    response_started = True
+                elif token_type == "token" and token:
+                    response_buffer.append(token)
+                    console.print(token, end="")
+                    sys.stdout.flush()
+                elif token_type == "end":
+                    console.print()  # Newline at end
+
             try:
-                with console.status("[bold yellow]Thinking...[/bold yellow]"):
-                    result = agent.process_message(user_input, session_id=session_id)
+                # Show tool count to set expectations (especially for Ollama)
+                tool_count = len(agent.tools)
+                if tool_count > 20:
+                    console.print(f"[dim]Using {tool_count} tools...[/dim]")
+
+                # Use streaming version
+                result = agent.process_message_stream(
+                    user_input,
+                    session_id=session_id,
+                    token_callback=stream_callback
+                )
             except KeyboardInterrupt:
                 console.print("\n[yellow]Operation cancelled. Returning to prompt...[/yellow]\n")
                 continue
@@ -1598,19 +1732,24 @@ def main():
                 action = result["action"]
                 data = result.get("data", {})
 
-                # Check if response contains markdown formatting
-                markdown_patterns = ["**", "#", "[", "- ", "1.", "```", "___"]
-                if ENABLE_MARKDOWN and any(pattern in response for pattern in markdown_patterns):
-                    # Render as markdown
-                    console.print("[bold blue]Collig:[/bold blue]")
-                    try:
-                        console.print(Markdown(response))
-                    except Exception:
-                        # Fallback to plain text if markdown rendering fails
-                        console.print(response)
-                else:
-                    # Render as plain text
-                    console.print(f"[bold blue]Collig:[/bold blue] {response}")
+                # If we didn't stream (e.g., needed tools), show the response now
+                if not response_started and response:
+                    # Check if response contains markdown formatting
+                    markdown_patterns = ["**", "#", "[", "- ", "1.", "```", "___"]
+                    if ENABLE_MARKDOWN and any(pattern in response for pattern in markdown_patterns):
+                        # Render as markdown
+                        console.print("[bold blue]Collig:[/bold blue]")
+                        try:
+                            console.print(Markdown(response))
+                        except Exception:
+                            # Fallback to plain text if markdown rendering fails
+                            console.print(response)
+                    else:
+                        # Render as plain text
+                        console.print(f"[bold blue]Collig:[/bold blue] {response}")
+                elif response_started:
+                    # We already streamed it, just add a newline
+                    console.print()
 
                 # Show token usage statistics
                 prompt_tokens = result.get("prompt_tokens", 0)
@@ -1633,7 +1772,7 @@ def main():
                             except Exception as e:
                                 console.print(f"[red]Failed to open browser: {e}[/red]")
 
-                # Check if news was just searched - offer interactive menu
+                # Check if news was just searched - open interactive menu directly
                 try:
                     from skills.news import NewsSkill
                     if NewsSkill.has_just_searched():
@@ -1641,11 +1780,15 @@ def main():
                         news_cache = NewsSkill.get_news_cache()
                         if news_cache:
                             console.print()
-                            if Confirm.ask("[bold cyan]📰 Open interactive news browser?[/bold cyan]", default=True):
-                                news_query = NewsSkill.get_last_query()
+                            news_query = NewsSkill.get_last_query()
+                            # Keep menu open until user quits
+                            while True:
                                 news_action = interactive_news_menu(news_cache, news_query)
                                 if news_action:
                                     handle_news_action(news_action, agent)
+                                else:
+                                    # User quit the menu
+                                    break
                 except Exception as e:
                     # If news menu fails, just continue quietly
                     pass

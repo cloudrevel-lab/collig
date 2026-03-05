@@ -417,7 +417,7 @@ class Agent:
     def _init_langchain_agent(self):
         """Initializes the LangChain Agent with tools from skills."""
 
-        llm = None
+        self.llm = None
 
         # Helper to get API key from env or config.json
         def get_api_key(env_var_name):
@@ -433,18 +433,31 @@ class Agent:
                     pass
             return key
 
+        # ALWAYS collect tools from enabled skills first - this must happen
+        # even if LLM initialization fails, so that skill toggle works
+        self.tools = []
+        for skill in self.skill_manager.skills:
+            if skill.enabled:
+                self.tools.extend(skill.get_tools())
+
+        if not self.tools:
+            print("Warning: No tools registered.")
+
+        print(f"[dim]Loaded {len(self.tools)} tools[/dim]")
+
+        # Now try to initialize LLM
         if self.llm_provider == "openai":
             api_key = get_api_key("OPENAI_API_KEY")
             if not api_key:
                 print("Warning: OPENAI_API_KEY not found. Agent will not function correctly.")
                 return
-            llm = ChatOpenAI(model=self.llm_model, temperature=0, api_key=api_key)
+            self.llm = ChatOpenAI(model=self.llm_model, temperature=0, api_key=api_key)
 
         elif self.llm_provider == "ollama" or self.llm_provider == "llama":
             # Using ChatOllama for local LLM
             # Assumes Ollama is running on localhost:11434 (default)
             try:
-                llm = ChatOllama(model=self.llm_model, temperature=0)
+                self.llm = ChatOllama(model=self.llm_model, temperature=0)
             except Exception as e:
                 print(f"Error initializing {self.llm_provider} (Ollama): {e}")
                 return
@@ -457,7 +470,7 @@ class Agent:
                 return
 
             # DeepSeek uses OpenAI-compatible API
-            llm = ChatOpenAI(
+            self.llm = ChatOpenAI(
                 model=self.llm_model,
                 temperature=0,
                 base_url="https://api.deepseek.com",
@@ -470,17 +483,6 @@ class Agent:
             self._init_langchain_agent()
             return
 
-        # Collect tools from all enabled skills
-        self.tools = []
-        for skill in self.skill_manager.skills:
-            if skill.enabled:
-                self.tools.extend(skill.get_tools())
-
-        if not self.tools:
-            print("Warning: No tools registered.")
-
-        print(f"[dim]Loaded {len(self.tools)} tools[/dim]")
-
         # Create React Agent (LangGraph)
         # Note: prompt can be a string (system prompt) or a SystemMessage.
         system_prompt = """You are Collig, an AI assistant. Use tools to help.
@@ -490,7 +492,7 @@ News items by number: use check_news_cache then read_news_item.
 Chinese calendar: use get_lunar_date tool only.
 
 Multi-select: use select_from_menu with comma-separated options for arrow-key selection."""
-        self.agent_executor = create_react_agent(llm, self.tools, prompt=system_prompt)
+        self.agent_executor = create_react_agent(self.llm, self.tools, prompt=system_prompt)
 
     def _load_external_skills(self):
         """Loads external skills from SKILL.md files."""
@@ -605,10 +607,12 @@ Multi-select: use select_from_menu with comma-separated options for arrow-key se
         return fallback_msgs
 
 
-    def process_message(self, message: str, session_id: str = None, include_history: bool = True, verbose: bool = None) -> dict:
+    def process_message(self, message: str, session_id: str = None, include_history: bool = True, verbose: bool = None, stream_callback=None) -> dict:
         """
         Process a user message, optionally within a session context.
         If verbose is not specified, uses the instance's verbose setting.
+
+        stream_callback: Optional function(token: str) to stream response tokens as they arrive
         """
         if verbose is None:
             verbose = self.verbose
@@ -651,6 +655,7 @@ Multi-select: use select_from_menu with comma-separated options for arrow-key se
             final_response_text = ""
             has_printed_header = False
             last_ai_message = None
+            response_started = False
 
             for event in self.agent_executor.stream(inputs):
                 for key, value in event.items():
@@ -714,6 +719,16 @@ Multi-select: use select_from_menu with comma-separated options for arrow-key se
                                 # Capture final response if it's the answer (no tool calls)
                                 if msg.content and not msg.tool_calls:
                                     final_response_text = msg.content
+
+                                    # Stream the response if callback is provided
+                                    if stream_callback and final_response_text:
+                                        if not response_started:
+                                            # Print the Collig: prefix once
+                                            stream_callback(None)  # Signal start
+                                            response_started = True
+                                        # Note: LangGraph returns full message each time, not incremental
+                                        # So we can't do true token-by-token streaming with the current setup
+                                        # But we can show the full response once we have it
 
                     elif key == "tools":
                         if "messages" in value:
@@ -802,6 +817,104 @@ Multi-select: use select_from_menu with comma-separated options for arrow-key se
             }
 
         return response_data
+
+    def process_message_stream(self, message: str, session_id: str = None, include_history: bool = True, verbose: bool = None, token_callback=None):
+        """
+        Process a message with streaming support.
+
+        token_callback: Function called with each token as it arrives
+        """
+        if verbose is None:
+            verbose = self.verbose
+
+        # Save user message to history
+        if session_id:
+            self.session_manager.add_message(session_id, "user", message)
+
+        try:
+            # Build the message list
+            msgs = []
+
+            # Inject current system time
+            from datetime import datetime
+            current_time_str = datetime.now().strftime("%A, %B %d, %Y %H:%M:%S")
+            msgs.append(SystemMessage(content=f"Current System Time: {current_time_str}"))
+
+            if session_id:
+                msgs.append(SystemMessage(content=f"Current Session ID: {session_id}"))
+
+                if include_history:
+                    history = self.session_manager.get_history(session_id)
+                    compressed_history = self._compress_history(history, message)
+                    msgs.extend(compressed_history)
+
+            msgs.append(HumanMessage(content=message))
+
+            # Simple heuristic: if message is simple (no obvious tool need),
+            # try direct LLM with streaming first
+            simple_keywords = ["what", "where", "when", "why", "how", "who", "hi", "hello", "hey", "thanks", "thank you"]
+            is_simple = any(message.lower().startswith(k) for k in simple_keywords) and len(message.split()) < 20
+
+            full_response = ""
+
+            if is_simple and self.llm:
+                # Try direct streaming first for simple queries
+                try:
+                    if token_callback:
+                        # Show Collig: prefix
+                        token_callback(None, "start")
+
+                    # Stream from LLM directly
+                    for chunk in self.llm.stream(msgs):
+                        if chunk.content:
+                            full_response += chunk.content
+                            if token_callback:
+                                token_callback(chunk.content, "token")
+
+                    if token_callback:
+                        token_callback(None, "end")
+
+                    # Save to history
+                    if session_id:
+                        self.session_manager.add_message(session_id, "ai", full_response)
+
+                    return {
+                        "response": full_response,
+                        "action": "agent_response",
+                        "prompt_tokens": 0,
+                        "completion_tokens": len(full_response) // 4,
+                        "total_tokens": len(full_response) // 4
+                    }
+                except Exception as e:
+                    # If streaming fails, fall back to regular agent
+                    if verbose:
+                        print(f"[dim]Streaming failed, falling back to agent: {e}[/dim]")
+
+            # Fall back to regular agent for complex queries / tool use
+            if verbose:
+                print(f"[dim]Using agent with tools...[/dim]")
+
+            result = self.process_message(message, session_id=session_id, include_history=include_history, verbose=verbose)
+
+            # If we have a result and a callback, simulate streaming at the end
+            if token_callback and result.get("response"):
+                token_callback(None, "start")
+                # Just show the full response at once
+                token_callback(result["response"], "token")
+                token_callback(None, "end")
+
+            return result
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return {
+                "response": f"I encountered an error: {str(e)}",
+                "action": "error",
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0
+            }
 
     def get_token_stats(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Get token usage statistics for a session."""

@@ -17,6 +17,7 @@ class NewsSkill(Skill):
     _news_cache: List[Dict[str, Any]] = []
     _last_query: str = ""
     _just_searched: bool = False  # Flag to indicate a search just completed
+    _current_cache_id: str = None  # ID of the current search if loaded from cache
 
     def __init__(self):
         super().__init__()
@@ -69,7 +70,15 @@ class NewsSkill(Skill):
                 NewsSkill._news_cache = results
                 NewsSkill._last_query = query
                 NewsSkill._just_searched = True
-                print(f"DEBUG: NewsSkill._news_cache updated. Size: {len(NewsSkill._news_cache)} ID: {id(NewsSkill._news_cache)} ClassID: {id(NewsSkill)}")
+                NewsSkill._current_cache_id = None
+
+                # Save to news cache manager
+                try:
+                    from core.news_cache import get_news_cache_manager
+                    cache_mgr = get_news_cache_manager()
+                    cache_mgr.save_search(query, results)
+                except Exception:
+                    pass  # Silently fail if cache save fails
 
                 output = [f"Found {len(results)} news items for '{query}':\n"]
                 for i, item in enumerate(results, 1):
@@ -79,6 +88,7 @@ class NewsSkill(Skill):
                     output.append(f"{i}. [{source}] {title} ({date})")
 
                 output.append("\nTo read a specific item, use the 'read_news_item' tool with the item number (e.g., 'read_news_item 1').")
+                output.append("\nTip: Use 'list_cached_news' to browse previous searches, or 'load_cached_news' to reload one.")
                 return "\n".join(output)
 
             except Exception as e:
@@ -93,9 +103,8 @@ class NewsSkill(Skill):
             Args:
                 index: The number of the news item to read (1-based).
             """
-            print(f"DEBUG: read_news_item called. Cache Size: {len(NewsSkill._news_cache)} ID: {id(NewsSkill._news_cache)} ClassID: {id(NewsSkill)}")
             if not NewsSkill._news_cache:
-                return "No news items available. Please search for news first."
+                return "No news items available. Please search for news first or load a cached search."
 
             if index < 1 or index > len(NewsSkill._news_cache):
                 return f"Invalid index. Please choose a number between 1 and {len(NewsSkill._news_cache)}."
@@ -115,62 +124,86 @@ class NewsSkill(Skill):
             )
 
         @tool
-        def cache_news_list() -> str:
+        def save_news_search() -> str:
             """
-            Cache the current news list for offline access.
-            This saves all news items from the last search to the local cache.
+            Save the current news search to the cache for later retrieval.
+            Use this to save a search you want to come back to later.
             """
             if not NewsSkill._news_cache:
-                return "No news items available to cache. Please search for news first."
+                return "No news items available to save. Please search for news first."
 
             try:
-                from core.paths import paths
-                import os
-                import datetime
+                from core.news_cache import get_news_cache_manager
+                cache_mgr = get_news_cache_manager()
+                cache_id = cache_mgr.save_search(NewsSkill._last_query, NewsSkill._news_cache)
+                return f"✅ Successfully saved news search! (ID: {cache_id})\nUse 'list_cached_news' to browse saved searches, or 'load_cached_news' to reload this one."
+            except Exception as e:
+                return f"Error saving news search: {str(e)}"
 
-                api_key = self.config.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
-                if not api_key:
-                    return "Cache system requires OPENAI_API_KEY to be set."
+        @tool
+        def list_cached_news() -> str:
+            """
+            List all cached news searches.
+            Shows all previously saved news searches with their timestamps.
+            """
+            try:
+                from core.news_cache import get_news_cache_manager
+                cache_mgr = get_news_cache_manager()
+                searches = cache_mgr.get_all_searches()
 
-                if not Chroma or not OpenAIEmbeddings:
-                    return "Cache system dependencies not available."
+                if not searches:
+                    return "No cached news searches found. Search for news and use 'save_news_search' to save it!"
 
-                persist_directory = paths.get_skill_data_dir("cache")
-                embeddings = OpenAIEmbeddings(api_key=api_key)
-                vectorstore = Chroma(
-                    persist_directory=persist_directory,
-                    embedding_function=embeddings,
-                    collection_name="user_cache"
-                )
+                output = ["📰 Saved News Searches:\n"]
+                for i, entry in enumerate(searches, 1):
+                    output.append(f"{i}. {entry.get_display_title()}")
 
-                cached_count = 0
-                for item in NewsSkill._news_cache:
-                    title = item.get('title', '')
-                    body = item.get('body', '')
-                    source = item.get('source', '')
-                    url = item.get('url', '')
-                    date = item.get('date', '')
-
-                    meta = {
-                        "content_type": "news",
-                        "title": title,
-                        "source": source,
-                        "url": url,
-                        "date": date,
-                        "original_query": NewsSkill._last_query,
-                        "timestamp": datetime.datetime.now().isoformat(),
-                        "type": "cached_content"
-                    }
-
-                    search_content = f"Title: {title}\nContent: {body}\nSource: {source}\nDate: {date}\nQuery: {NewsSkill._last_query}"
-
-                    vectorstore.add_documents([Document(page_content=search_content, metadata=meta)])
-                    cached_count += 1
-
-                return f"✅ Successfully cached {cached_count} news articles. You can now access them offline using the cache tools."
+                output.append("\nTo load a search, say 'load_cached_news 1' (or whatever number you want).")
+                output.append("You can also say 'load most recent news' to load the most recent one.")
+                return "\n".join(output)
 
             except Exception as e:
-                return f"Error caching news list: {str(e)}"
+                return f"Error listing cached news: {str(e)}"
+
+        @tool
+        def load_cached_news(index: int) -> str:
+            """
+            Load a cached news search by number.
+            Use after 'list_cached_news' to load a specific search.
+            Example: "load_cached_news 1" loads the first search in the list.
+            Args:
+                index: The number of the cached search to load (1-based, from list_cached_news)
+            """
+            try:
+                from core.news_cache import get_news_cache_manager
+                cache_mgr = get_news_cache_manager()
+                searches = cache_mgr.get_all_searches()
+
+                if not searches:
+                    return "No cached news searches found."
+
+                if index < 1 or index > len(searches):
+                    return f"Invalid index. Please choose a number between 1 and {len(searches)}."
+
+                entry = searches[index - 1]
+                NewsSkill._news_cache = entry.news_items
+                NewsSkill._last_query = entry.query
+                NewsSkill._just_searched = True
+                NewsSkill._current_cache_id = entry.cache_id
+
+                output = [f"✅ Loaded news search: \"{entry.query}\"\n"]
+                output.append(f"Found {len(entry.news_items)} news items:\n")
+
+                for i, item in enumerate(entry.news_items, 1):
+                    title = item.get('title', 'No Title')
+                    source = item.get('source', 'Unknown Source')
+                    date = item.get('date', '')
+                    output.append(f"{i}. [{source}] {title} ({date})")
+
+                return "\n".join(output)
+
+            except Exception as e:
+                return f"Error loading cached news: {str(e)}"
 
         @tool
         def check_news_cache() -> str:
@@ -180,13 +213,14 @@ class NewsSkill(Skill):
             Returns information about available cached news items.
             """
             if not NewsSkill._news_cache:
-                return "No news items currently available in memory. User needs to search for news first."
+                return "No news items currently available in memory. Search for news first, or load a cached search with 'load_cached_news'."
 
             count = len(NewsSkill._news_cache)
             query = NewsSkill._last_query or "unknown"
+            source = "cached search" if NewsSkill._current_cache_id else "recent search"
 
-            output = [f"News cache status: {count} items available from recent search."]
-            output.append(f"Last search query: '{query}'")
+            output = [f"News cache status: {count} items available ({source})."]
+            output.append(f"Query: '{query}'")
             output.append(f"Available item numbers: 1 to {count}")
             output.append("\nRecent items:")
             for i, item in enumerate(NewsSkill._news_cache[:5], 1):
@@ -197,6 +231,7 @@ class NewsSkill(Skill):
             if count > 5:
                 output.append(f"  ... and {count - 5} more items")
 
+            output.append("\nTip: Use 'list_cached_news' to see all saved searches, or 'save_news_search' to save the current one.")
             return "\n".join(output)
 
-        return [search_news, read_news_item, cache_news_list, check_news_cache]
+        return [search_news, read_news_item, save_news_search, list_cached_news, load_cached_news, check_news_cache]
