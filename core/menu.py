@@ -289,3 +289,114 @@ def create_simple_menu(
             menu.add_action(action)
 
     return menu
+
+
+def select_from_menu(
+    options: List[str],
+    title: str = "Select an option",
+    subtitle: str = "",
+    return_index: bool = False
+) -> Optional[Any]:
+    """
+    Simple single-select interactive menu.
+    Users navigate with up/down arrows and press Enter to select.
+
+    Args:
+        options: List of option strings to choose from
+        title: Menu title
+        subtitle: Optional menu subtitle
+        return_index: If True, returns the selected index instead of the option text
+
+    Returns:
+        Selected option text or index, or None if cancelled
+    """
+    from prompt_toolkit import Application
+    from prompt_toolkit.layout import Layout, HSplit, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+    from prompt_toolkit.layout.dimension import Dimension
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.formatted_text import to_formatted_text
+
+    if not options:
+        return None
+
+    selected_result = None
+    selected_index = 0
+
+    kb = KeyBindings()
+
+    @kb.add("up")
+    @kb.add("k")
+    def move_up(event):
+        nonlocal selected_index
+        selected_index = (selected_index - 1) % len(options)
+        menu_control.text = get_text()
+
+    @kb.add("down")
+    @kb.add("j")
+    def move_down(event):
+        nonlocal selected_index
+        selected_index = (selected_index + 1) % len(options)
+        menu_control.text = get_text()
+
+    @kb.add("enter")
+    def select(event):
+        nonlocal selected_result
+        selected_result = selected_index if return_index else options[selected_index]
+        event.app.exit(result=selected_result)
+
+    @kb.add("escape")
+    @kb.add("q")
+    def quit_menu(event):
+        event.app.exit(result=None)
+
+    @kb.add("c-c")
+    def ctrl_c(event):
+        event.app.exit(result=None)
+
+    def _truncate_text(text: str, max_len: int = 70) -> str:
+        """Truncate text for display."""
+        if not text:
+            return ""
+        return text[:max_len] + "..." if len(text) > max_len else text
+
+    def get_text():
+        result = []
+        result.append(("bold cyan", title))
+        if subtitle:
+            result.append(("", f" - {subtitle}"))
+        result.append(("", "\n\n"))
+
+        for i, option in enumerate(options):
+            prefix = " > " if i == selected_index else "   "
+            display_title = _truncate_text(option, 70)
+
+            if i == selected_index:
+                result.append(("bold reverse", f"{prefix}{display_title}"))
+                result.append(("", "\n"))
+            else:
+                line = f"{prefix}{display_title}"
+                result.append(("", line + "\n"))
+
+        # Footer
+        result.append(("", "\n"))
+        result.append(("dim", "[↑/↓/k/j] Navigate  [Enter] Select  [Esc] Cancel"))
+
+        return to_formatted_text(result)
+
+    menu_control = FormattedTextControl(text=get_text())
+    window = Window(
+        content=menu_control,
+        width=Dimension(min=60, preferred=90),
+        height=Dimension(min=len(options) + 6, preferred=len(options) + 8)
+    )
+
+    layout = Layout(HSplit([window]))
+    app = Application(layout=layout, key_bindings=kb, full_screen=False)
+
+    try:
+        return app.run()
+    except Exception as e:
+        print(f"[dim]Menu error: {e}[/dim]")
+        return None
+

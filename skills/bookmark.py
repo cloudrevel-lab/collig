@@ -57,6 +57,12 @@ class BookmarkSkill(Skill):
     def required_config(self) -> List[str]:
         return ["OPENAI_API_KEY"]
 
+    def configure(self, config: Dict[str, Any]):
+        """Configure the skill and reinitialize the vector store if API key becomes available."""
+        super().configure(config)
+        if not self.vectorstore:
+            self._initialize_store()
+
     def get_tools(self) -> List[BaseTool]:
 
         @tool

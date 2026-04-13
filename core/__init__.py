@@ -8,7 +8,8 @@ from .menu import (
     MenuItem,
     MenuAction,
     InteractiveMenu,
-    create_simple_menu
+    create_simple_menu,
+    select_from_menu
 )
 
 from .news_cache import (
@@ -22,6 +23,7 @@ __all__ = [
     'MenuAction',
     'InteractiveMenu',
     'create_simple_menu',
+    'select_from_menu',
     'NewsCacheEntry',
     'NewsCacheManager',
     'get_news_cache_manager'

@@ -22,7 +22,7 @@ from core.paths import paths
 # Import prompt_toolkit for advanced input handling
 from prompt_toolkit import PromptSession
 from prompt_toolkit.styles import Style
-from prompt_toolkit.history import InMemoryHistory
+from prompt_toolkit.history import InMemoryHistory, FileHistory
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.document import Document
 from prompt_toolkit.formatted_text import HTML, to_formatted_text
@@ -67,6 +67,12 @@ class SkillCommandCompleter(Completer):
             ("verbose", "Show thinking messages"),
             ("toggle thinking", "Toggle thinking messages visibility"),
             ("toggle markdown", "Toggle markdown rendering"),
+            ("console", "Admin console management"),
+            ("console status", "Check if the admin console is running"),
+            ("console start", "Start the admin console"),
+            ("console stop", "Stop the admin console"),
+            ("console restart", "Restart the admin console"),
+            ("console open", "Open the console in your browser"),
             ("exit", "Exit the application"),
             ("quit", "Exit the application"),
             ("clear", "Clear the screen")
@@ -991,6 +997,214 @@ def handle_config_command(command_parts, agent=None):
     else:
         console.print(f"Unknown config action: {action}")
 
+
+# ─── Admin Console Management ──────────────────────────────────────────────────
+
+_CONSOLE_HOST = "localhost"
+_CONSOLE_PORT = 5005
+
+
+def _get_console_pid():
+    """Find the PID of the process listening on the console port using lsof."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["lsof", "-ti", f":{_CONSOLE_PORT}"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            # lsof may return multiple PIDs; return the first one
+            pids = result.stdout.strip().split("\n")
+            return int(pids[0])
+    except Exception:
+        pass
+    return None
+
+
+def _save_console_pid(pid):
+    """No-op — we use port-based detection instead of PID files."""
+    pass
+
+
+def _clear_console_pid():
+    """No-op — we use port-based detection instead of PID files."""
+    pass
+
+
+def _is_console_running():
+    """Check if the admin console is already running by probing the port."""
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.settimeout(2)
+        s.connect((_CONSOLE_HOST, _CONSOLE_PORT))
+        s.close()
+        return True
+    except (ConnectionRefusedError, OSError, socket.timeout):
+        return False
+
+
+def _start_console_process():
+    """Start the admin console as a background subprocess."""
+    import subprocess
+
+    collig_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+    # Check if port is already in use
+    if _is_console_running():
+        console.print(f"[yellow]Port {_CONSOLE_PORT} is already in use. Console may already be running.[/yellow]")
+        return
+
+    console.print(f"[cyan]Starting admin console on http://{_CONSOLE_HOST}:{_CONSOLE_PORT} ...[/cyan]")
+
+    # Determine how to run uvicorn
+    core_dir = os.path.join(collig_root, "core")
+    uvicorn_cmd = [
+        "uv", "run", "uvicorn", "main:app",
+        "--host", "0.0.0.0", "--port", str(_CONSOLE_PORT),
+        "--reload",  # Auto-restart on file changes
+    ]
+
+    try:
+        # Write logs to a file for debugging
+        log_file = os.path.join(paths.home, "console.log")
+
+        with open(log_file, "w") as log_f:
+            proc = subprocess.Popen(
+                uvicorn_cmd,
+                cwd=core_dir,
+                stdout=log_f,
+                stderr=log_f,
+                start_new_session=True,
+            )
+
+        # Give it time to start — uv run + uvicorn init can take a few seconds
+        import time
+        for i in range(10):
+            time.sleep(1)
+            if _is_console_running():
+                break
+        else:
+            # Waited 10 seconds, still not running
+            console.print("[yellow]Console started but server not yet responding. Checking log...[/yellow]")
+            try:
+                with open(log_file) as lf:
+                    lines = lf.readlines()[-8:]
+                    for line in lines:
+                        console.print(f"  [dim]{line.rstrip()}[/dim]")
+            except Exception:
+                pass
+            # Give it 3 more seconds and try once more
+            time.sleep(3)
+
+        if _is_console_running():
+            pid = _get_console_pid()
+            pid_str = f" (PID: {pid})" if pid else ""
+            console.print(f"[green]Admin console started:[/green] http://{_CONSOLE_HOST}:{_CONSOLE_PORT}/admin{pid_str}")
+        else:
+            console.print("[red]Failed to start admin console.[/red]")
+            try:
+                with open(log_file) as lf:
+                    lines = lf.readlines()[-8:]
+                    for line in lines:
+                        console.print(f"  [dim]{line.rstrip()}[/dim]")
+            except Exception:
+                pass
+
+    except FileNotFoundError:
+        console.print("[red]'uv' command not found. Make sure uv is installed.[/red]")
+    except Exception as e:
+        console.print(f"[red]Error starting console: {e}[/red]")
+
+
+def _stop_console_process():
+    """Stop the running admin console process."""
+    pid = _get_console_pid()
+    if not pid:
+        console.print(f"[yellow]No admin console process found on port {_CONSOLE_PORT}.[/yellow]")
+        return
+
+    try:
+        import signal
+        os.kill(pid, signal.SIGTERM)
+        console.print(f"[green]Admin console stopped (PID {pid}).[/green]")
+
+        # Also kill any other processes on the same port (cleanup)
+        import subprocess
+        import time
+        time.sleep(0.5)
+        remaining = _get_console_pid()
+        if remaining:
+            try:
+                os.kill(remaining, signal.SIGKILL)
+            except Exception:
+                pass
+    except ProcessLookupError:
+        console.print("[yellow]Process already terminated.[/yellow]")
+    except Exception as e:
+        console.print(f"[red]Error stopping console: {e}[/red]")
+
+
+def handle_console_command(user_input):
+    """Handle /console status|start|stop|restart commands."""
+    parts = user_input.strip().split()
+
+    if len(parts) < 2 or parts[1].lower() == "status":
+        # Show status
+        if _is_console_running():
+            console.print(Panel(
+                f"[green]● Admin console is running[/green]\n\n"
+                f"  URL: [bold cyan]http://{_CONSOLE_HOST}:{_CONSOLE_PORT}/admin[/bold cyan]\n"
+                f"  PID: {_get_console_pid()}\n"
+                f"  API: http://{_CONSOLE_HOST}:{_CONSOLE_PORT}/api/*",
+                title="Admin Console",
+                border_style="green"
+            ))
+        else:
+            console.print(Panel(
+                "[yellow]○ Admin console is not running[/yellow]\n\n"
+                "  Use [bold]/console start[/bold] to launch it.",
+                title="Admin Console",
+                border_style="yellow"
+            ))
+
+    elif parts[1].lower() == "start":
+        if _is_console_running():
+            console.print(f"[yellow]Admin console is already running at http://{_CONSOLE_HOST}:{_CONSOLE_PORT}/admin[/yellow]")
+        else:
+            _start_console_process()
+
+    elif parts[1].lower() == "stop":
+        _stop_console_process()
+
+    elif parts[1].lower() == "restart":
+        _stop_console_process()
+        import time
+        time.sleep(1)
+        _start_console_process()
+
+    elif parts[1].lower() == "open":
+        """Open the admin console URL in the default browser."""
+        import webbrowser
+        url = f"http://{_CONSOLE_HOST}:{_CONSOLE_PORT}/admin"
+        if _is_console_running():
+            webbrowser.open(url)
+            console.print(f"[green]Opened admin console in browser:[/green] {url}")
+        else:
+            console.print(f"[yellow]Admin console is not running. Start it first with [bold]/console start[/bold].[/yellow]")
+            console.print(f"  URL would be: [cyan]{url}[/cyan]")
+
+    else:
+        console.print(
+            "[bold]Admin Console Commands:[/bold]\n\n"
+            "  [cyan]/console status[/cyan]  — Check if the admin console is running\n"
+            "  [cyan]/console start[/cyan]   — Start the admin console\n"
+            "  [cyan]/console stop[/cyan]    — Stop the admin console\n"
+            "  [cyan]/console restart[/cyan] — Restart the admin console\n"
+            "  [cyan]/console open[/cyan]    — Open the console in your browser"
+        )
+
+
 def check_setup():
     """Checks if the environment is set up (e.g., API keys exist)."""
     # 1. Check environment variable
@@ -1117,8 +1331,10 @@ def main():
             ('bold', '[Tab]'), ('', ' Complete')
         ], style='class:bottom-toolbar')
 
+    # Create persistent history file path
+    history_file = os.path.join(paths.data_dir, "command_history.txt")
     pt_session = PromptSession(
-        history=InMemoryHistory(),
+        history=FileHistory(history_file),
         completer=completer,
         complete_while_typing=True,
         key_bindings=kb,
@@ -1692,6 +1908,10 @@ def main():
                 new_config = load_config()
                 for skill in agent.skill_manager.skills:
                     skill.configure(new_config)
+                continue
+
+            if user_input.startswith("console"):
+                handle_console_command(user_input)
                 continue
 
             # Inner try-except for agent processing - can be interrupted with Ctrl+C

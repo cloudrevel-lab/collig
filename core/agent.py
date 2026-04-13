@@ -23,14 +23,54 @@ from skills.date_calculator import DateCalculatorSkill
 from skills.cache import CacheSkill
 from skills.lunar_calendar import LunarCalendarSkill
 from skills.menu import MenuSkill
+from skills.survey import SurveySkill
 from core.session import SessionManager
 from core.paths import paths
+
+from rich.console import Console
 
 from langchain_openai import ChatOpenAI
 from langchain_ollama import ChatOllama
 from langgraph.prebuilt import create_react_agent
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langchain_core.tools import tool
+
+# Rich console for properly formatted output
+console = Console()
+
+# Patterns that indicate a trivial query (no tools needed)
+_TRIVIAL_PATTERNS = [
+    # Simple math: "1+1", "2 * 3", "100 / 5", "what is 2+2", "what's 1+1", etc.
+    re.compile(r'^(what(?:\s*[\']s)?|calc(?:ulate)?|solve)\s*:?\s*\d+\s*[\+\-\*/x÷]\s*\d+', re.IGNORECASE),
+    re.compile(r'^\d+\s*[\+\-\*/x÷]\s*\d+'),
+    # Greetings
+    re.compile(r'^(hi|hello|hey|greetings|good\s+(morning|afternoon|evening|day))\.?$', re.IGNORECASE),
+    # Simple identity questions
+    re.compile(r'^(who\s+are\s+you|what\s+are\s+you|what\s+(is|are)\s+your\s+(name|capabilities))\??$', re.IGNORECASE),
+    # Thanks
+    re.compile(r'^(thanks?|thank\s+you|thx|cheers|appreciate\s+it)\.?$', re.IGNORECASE),
+]
+
+# Keyword groups for tool category matching
+_TOOL_KEYWORDS = {
+    'weather': ['weather', 'temperature', 'forecast', 'rain', 'sunny', 'cold', 'hot'],
+    'time': ['time', 'clock', 'timezone', 'what time'],
+    'news': ['news', 'headlines', 'latest news', 'current events', 'breaking news'],
+    'email': ['email', 'mail', 'inbox', 'send email', 'check mail', 'compose'],
+    'file': ['file', 'directory', 'folder', 'read file', 'write file', 'create file', 'list files', 'delete file'],
+    'git': ['git', 'commit', 'push', 'pull', 'branch', 'status', 'diff', 'stash'],
+    'memory': ['note', 'remember', 'save note', 'my notes', 'search notes'],
+    'bookmark': ['bookmark', 'save link', 'saved links', 'favorites'],
+    'profile': ['my name', 'my info', 'personal info', 'set my name', 'about me'],
+    'system': ['system status', 'disk space', 'memory usage', 'install', 'package'],
+    'calendar': ['lunar', 'chinese calendar', 'chinese date'],
+    'date': ['days between', 'date calculator', 'what date', 'add days', 'subtract days'],
+    'cache': ['cache', 'cached'],
+    'browser': ['open browser', 'open website', 'launch browser', 'browse'],
+    'menu': ['menu', 'select from', 'choose from'],
+    'survey': ['survey', 'questionnaire', 'form'],
+    'thinking': ['hide thinking', 'show thinking', 'toggle thinking'],
+}
 
 
 # Try to import tiktoken for accurate token counting
@@ -260,6 +300,73 @@ class TokenStatsManager:
         }
 
 
+def _is_trivial_query(message: str) -> bool:
+    """Check if a message is a trivial query that doesn't need tools."""
+    msg = message.strip()
+    for pattern in _TRIVIAL_PATTERNS:
+        if pattern.match(msg):
+            return True
+    return False
+
+
+def _filter_tools_for_message(message: str, all_tools: list) -> list:
+    """
+    Filter tools based on message intent to reduce token usage.
+    Returns a subset of relevant tools, or empty list for trivial queries.
+    """
+    msg_lower = message.lower().strip()
+
+    # Trivial queries need no tools at all
+    if _is_trivial_query(msg_lower):
+        return []
+
+    # Find matching tool categories
+    matching_categories = set()
+    for category, keywords in _TOOL_KEYWORDS.items():
+        for keyword in keywords:
+            if keyword in msg_lower:
+                matching_categories.add(category)
+                break
+
+    # If no category matched, include a broader set of commonly useful tools
+    if not matching_categories:
+        # General conversation: include only core utilities
+        matching_categories = {'time', 'thinking', 'profile'}
+
+    # Map categories to tool name prefixes/patterns
+    category_tool_prefixes = {
+        'weather': ['get_weather'],
+        'time': ['get_current_time'],
+        'news': ['search_news', 'read_news', 'check_news', 'list_cached_news', 'load_cached_news', 'save_news'],
+        'email': ['setup_email', 'check_inbox', 'send_email', 'download_emails', 'search_emails', 'read_email'],
+        'file': ['create_directory', 'list_directory', 'delete_item', 'write_file', 'read_file'],
+        'git': ['git_status', 'git_add', 'git_commit', 'git_push', 'git_diff', 'git_log'],
+        'memory': ['add_note', 'list_notes', 'search_notes', 'delete_notes'],
+        'bookmark': ['add_bookmark', 'list_bookmarks', 'search_bookmarks', 'delete_bookmark', 'open_bookmark'],
+        'profile': ['set_personal_info', 'get_personal_info'],
+        'system': ['get_system_status', 'clear_conversation', 'install_package'],
+        'calendar': ['get_lunar_date'],
+        'date': ['date_calculator'],
+        'cache': ['cache_content', 'cache_news_list', 'list_cache', 'search_cache', 'get_cache_item', 'delete_cache', 'clear_cache'],
+        'browser': ['open_browser'],
+        'menu': ['select_from_menu', 'select_option_by_number'],
+        'survey': ['load_survey', 'continue_survey'],
+        'thinking': ['hide_thinking', 'show_thinking', 'toggle_thinking'],
+    }
+
+    # Collect matching tool names
+    matching_tool_names = set()
+    for cat in matching_categories:
+        matching_tool_names.update(category_tool_prefixes.get(cat, []))
+
+    # Filter tools
+    if matching_tool_names:
+        return [t for t in all_tools if t.name in matching_tool_names]
+
+    # Fallback: return all tools if filtering somehow produced nothing
+    return all_tools
+
+
 class Agent:
     def __init__(self):
         import time as time_module
@@ -287,15 +394,15 @@ class Agent:
              self.llm_model = os.getenv("LLM_MODEL", "gpt-4o")
              self.verbose = True
 
-        print(f"[dim]Basic setup: {time_module.time() - init_start:.2f}s[/dim]")
+        console.print(f"[dim]Basic setup: {time_module.time() - init_start:.2f}s[/dim]")
 
         skills_start = time_module.time()
         self._register_initial_skills()
-        print(f"[dim]Initial skills registered: {time_module.time() - skills_start:.2f}s[/dim]")
+        console.print(f"[dim]Initial skills registered: {time_module.time() - skills_start:.2f}s[/dim]")
 
         external_start = time_module.time()
         self._load_external_skills()
-        print(f"[dim]External skills loaded: {time_module.time() - external_start:.2f}s[/dim]")
+        console.print(f"[dim]External skills loaded: {time_module.time() - external_start:.2f}s[/dim]")
 
         # Set global agent reference for skills that need it
         from skills.builtins import set_agent_instance
@@ -303,10 +410,10 @@ class Agent:
 
         # Initialize LangChain/LangGraph Agent
         langchain_start = time_module.time()
-        print(f"[dim]Initializing LangChain agent...[/dim]")
+        console.print(f"[dim]Initializing LangChain agent...[/dim]")
         self._init_langchain_agent()
-        print(f"[dim]LangChain agent initialized: {time_module.time() - langchain_start:.2f}s[/dim]")
-        print(f"[dim]Total agent initialization: {time_module.time() - init_start:.2f}s[/dim]")
+        console.print(f"[dim]LangChain agent initialized: {time_module.time() - langchain_start:.2f}s[/dim]")
+        console.print(f"[dim]Total agent initialization: {time_module.time() - init_start:.2f}s[/dim]")
 
     def set_provider(self, provider: str, model: str = None):
         """Switches the LLM provider (openai/ollama/llama/deepseek)."""
@@ -322,7 +429,7 @@ class Agent:
         elif self.llm_provider == "deepseek":
             self.llm_model = "deepseek-chat" # Default for deepseek
 
-        print(f"Switching provider to {self.llm_provider} (Model: {self.llm_model})")
+        console.print(f"Switching provider to {self.llm_provider} (Model: {self.llm_model})")
         self._init_langchain_agent()
         return f"Provider switched to {self.llm_provider} ({self.llm_model})"
 
@@ -412,6 +519,7 @@ class Agent:
         self.skill_manager.register_skill(CacheSkill())
         self.skill_manager.register_skill(LunarCalendarSkill())
         self.skill_manager.register_skill(MenuSkill())
+        self.skill_manager.register_skill(SurveySkill())
         # self.skill_manager.register_skill(ChatSkill()) # Fallback / General Skill
 
     def _init_langchain_agent(self):
@@ -441,15 +549,15 @@ class Agent:
                 self.tools.extend(skill.get_tools())
 
         if not self.tools:
-            print("Warning: No tools registered.")
+            console.print("Warning: No tools registered.")
 
-        print(f"[dim]Loaded {len(self.tools)} tools[/dim]")
+        console.print(f"[dim]Loaded {len(self.tools)} tools[/dim]")
 
         # Now try to initialize LLM
         if self.llm_provider == "openai":
             api_key = get_api_key("OPENAI_API_KEY")
             if not api_key:
-                print("Warning: OPENAI_API_KEY not found. Agent will not function correctly.")
+                console.print("Warning: OPENAI_API_KEY not found. Agent will not function correctly.")
                 return
             self.llm = ChatOpenAI(model=self.llm_model, temperature=0, api_key=api_key)
 
@@ -459,13 +567,13 @@ class Agent:
             try:
                 self.llm = ChatOllama(model=self.llm_model, temperature=0)
             except Exception as e:
-                print(f"Error initializing {self.llm_provider} (Ollama): {e}")
+                console.print(f"Error initializing {self.llm_provider} (Ollama): {e}")
                 return
 
         elif self.llm_provider == "deepseek":
             api_key = get_api_key("DEEPSEEK_API_KEY")
             if not api_key:
-                print("Warning: DEEPSEEK_API_KEY not found. Please set it using 'config set DEEPSEEK_API_KEY <key>'.")
+                console.print("Warning: DEEPSEEK_API_KEY not found. Please set it using 'config set DEEPSEEK_API_KEY <key>'.")
                 # Do not initialize LLM without key to avoid async key error
                 return
 
@@ -478,21 +586,31 @@ class Agent:
             )
 
         else:
-            print(f"Unknown provider: {self.llm_provider}. Falling back to OpenAI.")
+            console.print(f"Unknown provider: {self.llm_provider}. Falling back to OpenAI.")
             self.llm_provider = "openai"
             self._init_langchain_agent()
             return
 
         # Create React Agent (LangGraph)
         # Note: prompt can be a string (system prompt) or a SystemMessage.
-        system_prompt = """You are Collig, an AI assistant. Use tools to help.
+        system_prompt = """You are Collig, an AI assistant.
 
-News items by number: use check_news_cache then read_news_item.
+IMPORTANT: Only use tools when they are genuinely needed. For simple math, greetings, general knowledge, or conversational questions, respond directly without any tool calls.
 
-Chinese calendar: use get_lunar_date tool only.
+When you DO use tools:
+- Use only the tools provided to you.
+- Don't make up tool names.
+- If a tool doesn't exist, don't try to call it.
 
-Multi-select: use select_from_menu with comma-separated options for arrow-key selection."""
-        self.agent_executor = create_react_agent(self.llm, self.tools, prompt=system_prompt)
+Specific tool hints:
+- News items by number: use check_news_cache then read_news_item.
+- Chinese calendar: use get_lunar_date tool only.
+- Multi-select: use select_from_menu with comma-separated options for arrow-key selection."""
+
+        # Store all tools for reference, but we'll filter dynamically per message
+        self.all_tools = self.tools[:]
+
+        self.agent_executor = create_react_agent(self.llm, self.all_tools, prompt=system_prompt)
 
     def _load_external_skills(self):
         """Loads external skills from SKILL.md files."""
@@ -595,7 +713,7 @@ Multi-select: use select_from_menu with comma-separated options for arrow-key se
                 return compressed_msgs
 
         except Exception as e:
-            print(f"Warning: History compression failed ({e}). Falling back to truncation.")
+            console.print(f"Warning: History compression failed ({e}). Falling back to truncation.")
 
         # Fallback: Just return last N messages
         fallback_msgs = []
@@ -607,12 +725,17 @@ Multi-select: use select_from_menu with comma-separated options for arrow-key se
         return fallback_msgs
 
 
-    def process_message(self, message: str, session_id: str = None, include_history: bool = True, verbose: bool = None, stream_callback=None) -> dict:
+    def process_message_stream(self, message: str, session_id: str = None, include_history: bool = True, verbose: bool = None, token_callback=None) -> dict:
+        """
+        Process a user message with optional streaming callback.
+        The token_callback is maintained for backwards compatibility but not actively used.
+        """
+        return self.process_message(message, session_id, include_history, verbose)
+
+    def process_message(self, message: str, session_id: str = None, include_history: bool = True, verbose: bool = None) -> dict:
         """
         Process a user message, optionally within a session context.
         If verbose is not specified, uses the instance's verbose setting.
-
-        stream_callback: Optional function(token: str) to stream response tokens as they arrive
         """
         if verbose is None:
             verbose = self.verbose
@@ -627,6 +750,36 @@ Multi-select: use select_from_menu with comma-separated options for arrow-key se
         # Initialize token counters
         total_prompt_tokens = 0
         total_completion_tokens = 0
+
+        # Filter tools based on message intent to reduce token usage
+        filtered_tools = _filter_tools_for_message(message, self.all_tools)
+        num_filtered = len(filtered_tools)
+        num_total = len(self.all_tools)
+
+        # Create a temporary agent with filtered tools if different from default
+        use_filtered = num_filtered < num_total and num_filtered > 0
+        use_no_tools = num_filtered == 0
+
+        if use_no_tools:
+            # For trivial queries, use a simple LLM call without tools
+            return self._process_simple_message(message, session_id)
+        elif use_filtered:
+            # Create a temporary agent with filtered tools
+            temp_agent_executor = create_react_agent(self.llm, filtered_tools, prompt="""You are Collig, an AI assistant.
+
+IMPORTANT: Only use tools when they are genuinely needed. For simple math, greetings, general knowledge, or conversational questions, respond directly without any tool calls.
+
+When you DO use tools:
+- Use only the tools provided to you.
+- Don't make up tool names.
+- If a tool doesn't exist, don't try to call it.
+
+Specific tool hints:
+- News items by number: use check_news_cache then read_news_item.
+- Chinese calendar: use get_lunar_date tool only.
+- Multi-select: use select_from_menu with comma-separated options for arrow-key selection.""")
+        else:
+            temp_agent_executor = self.agent_executor
 
         try:
             # Build the message list
@@ -657,7 +810,7 @@ Multi-select: use select_from_menu with comma-separated options for arrow-key se
             last_ai_message = None
             response_started = False
 
-            for event in self.agent_executor.stream(inputs):
+            for event in temp_agent_executor.stream(inputs):
                 for key, value in event.items():
                     if key == "agent":
                         if "messages" in value:
@@ -684,18 +837,18 @@ Multi-select: use select_from_menu with comma-separated options for arrow-key se
 
                                 # Print header if needed
                                 if verbose and should_print and not has_printed_header:
-                                    print("\n[Thinking Process]")
+                                    console.print("\n[Thinking Process]")
                                     has_printed_header = True
 
                                 # Do the printing
                                 if verbose and should_print:
                                     if msg.content and msg.tool_calls:
-                                        print(f"  ➜ Reasoning: {msg.content}")
+                                        console.print(f"  ➜ Reasoning: {msg.content}")
 
                                     if msg.tool_calls:
                                         import json
                                         for tc in msg.tool_calls:
-                                            print(f"  ➜ Planning to use tool: \033[1m{tc['name']}\033[0m")
+                                            console.print(f"  ➜ Planning to use tool: [bold]{tc['name']}[/bold]")
 
                                             # Pretty print arguments
                                             args = tc.get('args', {})
@@ -710,42 +863,32 @@ Multi-select: use select_from_menu with comma-separated options for arrow-key se
                                                 try:
                                                     pretty_args = json.dumps(safe_args, indent=2)
                                                     indented_args = "\n".join("    " + line for line in pretty_args.splitlines())
-                                                    print(f"    Args:\n{indented_args}")
+                                                    console.print(f"    Args:\n{indented_args}")
                                                 except:
-                                                    print(f"    Args: {safe_args}")
+                                                    console.print(f"    Args: {safe_args}")
                                             else:
-                                                print(f"    Args: {{}}")
+                                                console.print(f"    Args: {{}}")
 
                                 # Capture final response if it's the answer (no tool calls)
                                 if msg.content and not msg.tool_calls:
                                     final_response_text = msg.content
-
-                                    # Stream the response if callback is provided
-                                    if stream_callback and final_response_text:
-                                        if not response_started:
-                                            # Print the Collig: prefix once
-                                            stream_callback(None)  # Signal start
-                                            response_started = True
-                                        # Note: LangGraph returns full message each time, not incremental
-                                        # So we can't do true token-by-token streaming with the current setup
-                                        # But we can show the full response once we have it
 
                     elif key == "tools":
                         if "messages" in value:
                             msg = value["messages"][-1]
 
                             if verbose and not has_printed_header:
-                                print("\n[Thinking Process]")
+                                console.print("\n[Thinking Process]")
                                 has_printed_header = True
 
                             if verbose:
-                                print(f"    ✔ Tool '{msg.name}' executed.")
+                                console.print(f"    ✔ Tool '{msg.name}' executed.")
 
                 # Keep track of the last event as the final state
                 final_state = event
 
             if verbose and has_printed_header:
-                print("[End of Thinking]\n")
+                console.print("[End of Thinking]\n")
 
             # Extract the final response from the last state if not already found
             if not final_response_text and final_state and "agent" in final_state:
@@ -767,18 +910,19 @@ Multi-select: use select_from_menu with comma-separated options for arrow-key se
                     total_completion_tokens = completion_tok
 
             # If we STILL don't have token counts, use a reasonable estimate
-            # This is NOT a bug - with ~15 skills, this is the actual token cost!
+            # With tool filtering, this should be much lower than before.
             if total_prompt_tokens == 0 and total_completion_tokens == 0:
-                num_tools = len(self.tools) if hasattr(self, 'tools') else 15
+                # Count actual tools used in this turn
+                active_tools = num_filtered if use_filtered else (0 if use_no_tools else num_total)
 
                 # Build a rough estimate of the prompt
-                approx_prompt = """You are Collig, an intelligent AI co-worker. Use the available tools to assist the user. If you need to write code, use the file system tools."""
+                approx_prompt = """You are Collig, an AI assistant."""
                 for msg in msgs:
                     if hasattr(msg, 'content') and msg.content:
                         approx_prompt += str(msg.content) + " "
 
                 base_tokens = estimate_tokens(approx_prompt)
-                tool_tokens = num_tools * 150  # ~150 tokens per tool with schema
+                tool_tokens = active_tools * 150  # ~150 tokens per tool with schema
 
                 total_prompt_tokens = base_tokens + tool_tokens
                 total_completion_tokens = estimate_tokens(final_response_text)
@@ -818,92 +962,47 @@ Multi-select: use select_from_menu with comma-separated options for arrow-key se
 
         return response_data
 
-    def process_message_stream(self, message: str, session_id: str = None, include_history: bool = True, verbose: bool = None, token_callback=None):
+    def _process_simple_message(self, message: str, session_id: str = None) -> dict:
         """
-        Process a message with streaming support.
-
-        token_callback: Function called with each token as it arrives
+        Process a trivial message (greeting, simple math, etc.) without any tools.
+        This saves significant tokens by avoiding tool schema injection.
         """
-        if verbose is None:
-            verbose = self.verbose
-
-        # Save user message to history
-        if session_id:
-            self.session_manager.add_message(session_id, "user", message)
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
 
         try:
-            # Build the message list
-            msgs = []
+            # Build minimal message list
+            msgs = [HumanMessage(content=message)]
 
-            # Inject current system time
-            from datetime import datetime
-            current_time_str = datetime.now().strftime("%A, %B %d, %Y %H:%M:%S")
-            msgs.append(SystemMessage(content=f"Current System Time: {current_time_str}"))
+            # Direct LLM call without tools
+            response = self.llm.invoke(msgs)
+            response_text = response.content if hasattr(response, 'content') else str(response)
 
+            # Extract token usage
+            total_prompt_tokens, total_completion_tokens = extract_token_usage(response)
+            if total_prompt_tokens == 0:
+                total_prompt_tokens = estimate_tokens(message) + 50  # small system overhead
+                total_completion_tokens = estimate_tokens(response_text)
+
+            # Save token stats
+            self.token_stats_manager.add_interaction(
+                session_id,
+                total_prompt_tokens,
+                total_completion_tokens,
+                user_message=message
+            )
+
+            # Save AI response to history
             if session_id:
-                msgs.append(SystemMessage(content=f"Current Session ID: {session_id}"))
+                self.session_manager.add_message(session_id, "ai", response_text)
 
-                if include_history:
-                    history = self.session_manager.get_history(session_id)
-                    compressed_history = self._compress_history(history, message)
-                    msgs.extend(compressed_history)
-
-            msgs.append(HumanMessage(content=message))
-
-            # Simple heuristic: if message is simple (no obvious tool need),
-            # try direct LLM with streaming first
-            simple_keywords = ["what", "where", "when", "why", "how", "who", "hi", "hello", "hey", "thanks", "thank you"]
-            is_simple = any(message.lower().startswith(k) for k in simple_keywords) and len(message.split()) < 20
-
-            full_response = ""
-
-            if is_simple and self.llm:
-                # Try direct streaming first for simple queries
-                try:
-                    if token_callback:
-                        # Show Collig: prefix
-                        token_callback(None, "start")
-
-                    # Stream from LLM directly
-                    for chunk in self.llm.stream(msgs):
-                        if chunk.content:
-                            full_response += chunk.content
-                            if token_callback:
-                                token_callback(chunk.content, "token")
-
-                    if token_callback:
-                        token_callback(None, "end")
-
-                    # Save to history
-                    if session_id:
-                        self.session_manager.add_message(session_id, "ai", full_response)
-
-                    return {
-                        "response": full_response,
-                        "action": "agent_response",
-                        "prompt_tokens": 0,
-                        "completion_tokens": len(full_response) // 4,
-                        "total_tokens": len(full_response) // 4
-                    }
-                except Exception as e:
-                    # If streaming fails, fall back to regular agent
-                    if verbose:
-                        print(f"[dim]Streaming failed, falling back to agent: {e}[/dim]")
-
-            # Fall back to regular agent for complex queries / tool use
-            if verbose:
-                print(f"[dim]Using agent with tools...[/dim]")
-
-            result = self.process_message(message, session_id=session_id, include_history=include_history, verbose=verbose)
-
-            # If we have a result and a callback, simulate streaming at the end
-            if token_callback and result.get("response"):
-                token_callback(None, "start")
-                # Just show the full response at once
-                token_callback(result["response"], "token")
-                token_callback(None, "end")
-
-            return result
+            return {
+                "response": response_text,
+                "action": "agent_response",
+                "prompt_tokens": total_prompt_tokens,
+                "completion_tokens": total_completion_tokens,
+                "total_tokens": total_prompt_tokens + total_completion_tokens
+            }
 
         except Exception as e:
             import traceback
