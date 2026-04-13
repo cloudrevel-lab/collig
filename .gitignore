@@ -16,3 +16,6 @@ backend/data/bookmarks_db/
 *.sqlite3
 *.zip
 core/config.json
+
+# Qwen
+.qwen/
