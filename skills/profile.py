@@ -35,7 +35,26 @@ class ProfileSkill(Skill):
 
     def _initialize_store(self):
         """Attempts to initialize the vector store if configuration is available."""
-        api_key = self.config.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+        # Determine which provider is being used
+        llm_provider = self.config.get("LLM_PROVIDER", "openai")
+        
+        # Get API key and endpoint based on provider
+        api_key = None
+        base_url = None
+        
+        if llm_provider == "dashscope":
+            api_key = self.config.get("DASHSCOPE_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
+            endpoint_region = self.config.get("DASHSCOPE_ENDPOINT", "china")
+            endpoints = {
+                "china": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                "singapore": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+                "international": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+            }
+            base_url = endpoints.get(endpoint_region, endpoints["china"])
+            model_name = "text-embedding-v2"
+        else:
+            api_key = self.config.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+            model_name = "text-embedding-ada-002"
 
         if not api_key:
             return
@@ -43,7 +62,10 @@ class ProfileSkill(Skill):
         # Initialize Vector Store
         if Chroma and not self.vectorstore:
             try:
-                self.embeddings = OpenAIEmbeddings(api_key=api_key)
+                if base_url:
+                    self.embeddings = OpenAIEmbeddings(api_key=api_key, base_url=base_url, model=model_name)
+                else:
+                    self.embeddings = OpenAIEmbeddings(api_key=api_key, model=model_name)
                 self.vectorstore = Chroma(
                     persist_directory=self.persist_directory,
                     embedding_function=self.embeddings,
@@ -54,7 +76,7 @@ class ProfileSkill(Skill):
 
     @property
     def required_config(self) -> List[str]:
-        return ["OPENAI_API_KEY"]
+        return ["OPENAI_API_KEY", "DASHSCOPE_API_KEY"]
 
     def get_tools(self) -> List[BaseTool]:
 

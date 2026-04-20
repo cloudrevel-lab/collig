@@ -42,20 +42,47 @@ class EmailSkill(Skill):
         if self.vectorstore:
             return self.vectorstore
 
-        api_key = self.config.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+        # Determine which provider is being used
+        llm_provider = self.config.get("LLM_PROVIDER", "openai")
+        
+        # Get API key and endpoint based on provider
+        api_key = None
+        base_url = None
+        
+        if llm_provider == "dashscope":
+            api_key = self.config.get("DASHSCOPE_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
+            endpoint_region = self.config.get("DASHSCOPE_ENDPOINT", "china")
+            endpoints = {
+                "china": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                "singapore": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+                "international": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+            }
+            base_url = endpoints.get(endpoint_region, endpoints["china"])
+            model_name = "text-embedding-v2"
+        else:
+            api_key = self.config.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+            model_name = "text-embedding-ada-002"
+        
         if not api_key:
              # Try loading from global config file directly if not in self.config
             import json
             try:
                 with open(paths.global_config_file, "r") as f:
                      g_conf = json.load(f)
-                     api_key = g_conf.get("OPENAI_API_KEY")
+                     llm_provider = g_conf.get("LLM_PROVIDER", "openai")
+                     if llm_provider == "dashscope":
+                         api_key = g_conf.get("DASHSCOPE_API_KEY")
+                     else:
+                         api_key = g_conf.get("OPENAI_API_KEY")
             except:
                 pass
 
         if api_key and Chroma:
             try:
-                self.embeddings = OpenAIEmbeddings(api_key=api_key)
+                if base_url:
+                    self.embeddings = OpenAIEmbeddings(api_key=api_key, base_url=base_url, model=model_name)
+                else:
+                    self.embeddings = OpenAIEmbeddings(api_key=api_key, model=model_name)
                 self.vectorstore = Chroma(
                     persist_directory=self.persist_directory,
                     embedding_function=self.embeddings,
