@@ -11,14 +11,14 @@ import datetime
 # Add parent directory to sys.path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from agent import agent
+from core.agent import agent
 
 load_dotenv()
 
 # Configure skills with API keys (same as CLI does)
 import json
 try:
-    from paths import paths as _paths
+    from core.paths import paths as _paths
     with open(_paths.global_config_file, "r") as f:
         _config = json.load(f)
 except Exception:
@@ -320,7 +320,7 @@ def update_note(note_id: str, note: NoteUpdate):
 def list_sessions():
     """List all chat sessions with summary info."""
     try:
-        from paths import paths as _paths
+        from core.paths import paths as _paths
         sessions_dir = _paths.sessions_dir
         if not os.path.exists(sessions_dir):
             return {"sessions": [], "total": 0}
@@ -366,7 +366,7 @@ def list_sessions():
 def get_session(session_id: str):
     """Get full session details including all messages."""
     try:
-        from paths import paths as _paths
+        from core.paths import paths as _paths
         fpath = os.path.join(_paths.sessions_dir, f"{session_id}.json")
         if not os.path.exists(fpath):
             raise HTTPException(status_code=404, detail="Session not found")
@@ -382,7 +382,7 @@ def get_session(session_id: str):
 def delete_session(session_id: str):
     """Delete a chat session and its stats."""
     try:
-        from paths import paths as _paths
+        from core.paths import paths as _paths
         # Delete session file
         fpath = os.path.join(_paths.sessions_dir, f"{session_id}.json")
         if os.path.exists(fpath):

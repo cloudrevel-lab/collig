@@ -416,7 +416,7 @@ class Agent:
         console.print(f"[dim]Total agent initialization: {time_module.time() - init_start:.2f}s[/dim]")
 
     def set_provider(self, provider: str, model: str = None):
-        """Switches the LLM provider (openai/ollama/llama/deepseek)."""
+        """Switches the LLM provider (openai/ollama/llama/deepseek/dashscope)."""
         self.llm_provider = provider.lower()
         if model:
             self.llm_model = model
@@ -428,6 +428,8 @@ class Agent:
             self.llm_model = "gpt-4o" # Default for openai
         elif self.llm_provider == "deepseek":
             self.llm_model = "deepseek-chat" # Default for deepseek
+        elif self.llm_provider == "dashscope":
+            self.llm_model = "qwen-plus" # Default for dashscope
 
         console.print(f"Switching provider to {self.llm_provider} (Model: {self.llm_model})")
         self._init_langchain_agent()
@@ -465,8 +467,17 @@ class Agent:
         """Returns a string listing available models for the current or specified provider."""
         output = []
 
+        # DashScope (阿里云)
+        output.append("[bold cyan]dashscope (阿里云)[/bold cyan]:")
+        output.append("  - qwen-plus (recommended)")
+        output.append("  - qwen-max")
+        output.append("  - qwen-turbo")
+        output.append("  - qwen-long")
+        output.append("  Endpoint: China (https://dashscope.aliyuncs.com)")
+        output.append("  Endpoint: Singapore/International (https://dashscope-intl.aliyuncs.com)")
+
         # DeepSeek
-        output.append("[bold cyan]deepseek[/bold cyan]:")
+        output.append("\n[bold cyan]deepseek[/bold cyan]:")
         output.append("  - deepseek-chat (V3)")
         output.append("  - deepseek-reasoner (R1)")
 
@@ -584,6 +595,43 @@ class Agent:
                 base_url="https://api.deepseek.com",
                 api_key=api_key
             )
+
+        elif self.llm_provider == "dashscope":
+            api_key = get_api_key("DASHSCOPE_API_KEY")
+            if not api_key:
+                console.print("Warning: DASHSCOPE_API_KEY not found. Please set it using 'config set DASHSCOPE_API_KEY <key>'.")
+                return
+
+            # Get endpoint region from config (default: china)
+            try:
+                with open(paths.global_config_file, "r") as f:
+                    config = json.load(f)
+            except Exception:
+                config = {}
+            
+            endpoint_region = config.get("DASHSCOPE_ENDPOINT", "china")
+            
+            # DashScope endpoint URLs
+            endpoints = {
+                "china": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                "singapore": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+                "international": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+            }
+            
+            base_url = endpoints.get(endpoint_region, endpoints["china"])
+            
+            # Default model for DashScope if not set
+            if not self.llm_model or self.llm_model == "gpt-4o":
+                self.llm_model = "qwen-plus"
+            
+            # DashScope uses OpenAI-compatible API
+            self.llm = ChatOpenAI(
+                model=self.llm_model,
+                temperature=0,
+                base_url=base_url,
+                api_key=api_key
+            )
+            console.print(f"[dim]DashScope endpoint: {base_url}[/dim]")
 
         else:
             console.print(f"Unknown provider: {self.llm_provider}. Falling back to OpenAI.")

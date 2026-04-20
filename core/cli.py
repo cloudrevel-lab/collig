@@ -50,7 +50,7 @@ class SkillCommandCompleter(Completer):
             ("config set", "Set a configuration value"),
             ("backup", "Backup user data to a zip file"),
             ("restore", "Restore user data from a zip file"),
-            ("provider", "Switch LLM provider (openai/ollama/llama/deepseek)"),
+            ("provider", "Switch LLM provider (openai/ollama/llama/deepseek/dashscope)"),
             ("news", "Open interactive news browser (if news was searched)"),
             ("news cached", "Browse saved news searches"),
             ("news history", "Browse saved news searches"),
@@ -490,7 +490,7 @@ def get_config_schema(agent=None):
         "key": "LLM_PROVIDER",
         "type": "choice",
         "default": "openai",
-        "options": ["openai", "ollama", "llama", "deepseek"],
+        "options": ["openai", "ollama", "llama", "deepseek", "dashscope"],
         "category": "LLM",
         "description": "LLM provider"
     })
@@ -527,6 +527,23 @@ def get_config_schema(agent=None):
         "default": "",
         "category": "API Keys",
         "description": "Google Maps API Key (for Map skill)"
+    })
+
+    schema.append({
+        "key": "DASHSCOPE_API_KEY",
+        "type": "secret",
+        "default": "",
+        "category": "API Keys",
+        "description": "Alibaba Cloud DashScope API Key (for 阿里云/DashScope)"
+    })
+
+    schema.append({
+        "key": "DASHSCOPE_ENDPOINT",
+        "type": "choice",
+        "default": "china",
+        "options": ["china", "singapore", "international"],
+        "category": "API Keys",
+        "description": "DashScope endpoint region (china: https://dashscope.aliyuncs.com, singapore: https://dashscope-intl.aliyuncs.com)"
     })
 
     # Add any additional configs from agent skills
@@ -1813,6 +1830,24 @@ def main():
                     except:
                         status = "[red]OLLAMA NOT FOUND[/red]"
                         error_msg = "Ensure Ollama is installed and running."
+                elif agent.llm_provider == "dashscope":
+                    api_key, source = get_api_key_info("DASHSCOPE_API_KEY")
+                    if not api_key:
+                        status = "[red]MISSING API KEY[/red]"
+                        error_msg = "Please set DASHSCOPE_API_KEY in config.json or .env via '/config set'"
+                    else:
+                        api_key_source = source
+                        api_key_preview = api_key[:10] + "..." + api_key[-4:] if len(api_key) > 14 else "***"
+                        # Show endpoint info
+                        config = load_config()
+                        endpoint = config.get("DASHSCOPE_ENDPOINT", "china")
+                        endpoints = {
+                            "china": "https://dashscope.aliyuncs.com",
+                            "singapore": "https://dashscope-intl.aliyuncs.com",
+                            "international": "https://dashscope-intl.aliyuncs.com"
+                        }
+                        endpoint_url = endpoints.get(endpoint, endpoints["china"])
+                        console.print(f"  ➜ Endpoint: [cyan]{endpoint}[/cyan] ({endpoint_url})")
 
                 console.print(f"• Configuration: {status}")
                 if error_msg:
@@ -1867,6 +1902,24 @@ def main():
                     except:
                         status = "[red]OLLAMA NOT FOUND[/red]"
                         error_msg = "Ensure Ollama is installed and running."
+                elif agent.llm_provider == "dashscope":
+                    api_key, source = get_api_key_info("DASHSCOPE_API_KEY")
+                    if not api_key:
+                        status = "[red]MISSING API KEY[/red]"
+                        error_msg = "Please set DASHSCOPE_API_KEY in config.json or .env via '/config set'"
+                    else:
+                        api_key_source = source
+                        api_key_preview = api_key[:10] + "..." + api_key[-4:] if len(api_key) > 14 else "***"
+                        # Show endpoint info
+                        config = load_config()
+                        endpoint = config.get("DASHSCOPE_ENDPOINT", "china")
+                        endpoints = {
+                            "china": "https://dashscope.aliyuncs.com",
+                            "singapore": "https://dashscope-intl.aliyuncs.com",
+                            "international": "https://dashscope-intl.aliyuncs.com"
+                        }
+                        endpoint_url = endpoints.get(endpoint, endpoints["china"])
+                        console.print(f"  ➜ Endpoint: [cyan]{endpoint}[/cyan] ({endpoint_url})")
 
                 console.print(f"• Configuration: {status}")
                 if error_msg:
