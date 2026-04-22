@@ -56,6 +56,7 @@ class SkillCommandCompleter(Completer):
             ("news cached", "Browse saved news searches"),
             ("news history", "Browse saved news searches"),
             ("news saved", "Browse saved news searches"),
+            ("news list", "Browse saved news searches"),
             ("status", "Check system status and LLM connection"),
             ("stats", "Show token usage statistics (session + overall)"),
             ("stats session", "Show token usage for current session"),
@@ -255,6 +256,7 @@ def interactive_news_menu(news_items: list, query: str = "") -> dict:
     selected_index = 0
     mode = "list"  # "list" or "detail"
     last_action = None
+    save_status = None  # Track save status message
 
     def truncate_text(text: str, max_len: int = 60) -> str:
         if not text:
@@ -289,7 +291,10 @@ def interactive_news_menu(news_items: list, query: str = "") -> dict:
                 result.append(("", line + "\n"))
 
         result.append(("", "\n"))
-        result.append(("dim", "[↑/↓/k/j] Navigate  [Enter] Read  [o] Open  [Esc] Quit"))
+        # Show save status message if available
+        if save_status:
+            result.append(("green", f"{save_status}\n"))
+        result.append(("dim", "[↑/↓/k/j] Navigate  [Enter] Read  [o] Open  [s] Save  [Esc] Quit"))
         return to_formatted_text(result)
 
     def get_detail_text():
@@ -358,6 +363,23 @@ def interactive_news_menu(news_items: list, query: str = "") -> dict:
                 console.print(f"[red]Failed to open browser: {e}[/red]")
         else:
             console.print("[yellow]No URL available for this item[/yellow]")
+
+    @kb.add("s")
+    def save_search(event):
+        """Save the current news search to cache."""
+        nonlocal save_status
+        if not query:
+            save_status = "⚠ No query to save"
+        else:
+            try:
+                from core.news_cache import get_news_cache_manager
+                cache_mgr = get_news_cache_manager()
+                cache_id = cache_mgr.save_search(query, news_items)
+                save_status = f"✅ Saved! (ID: {cache_id[-6:]})"
+                console.print(f"[green]News saved: '{query}'[/green]")
+            except Exception as e:
+                save_status = f"⚠ Save failed: {e}"
+        menu_control.text = get_list_text()
 
     @kb.add("escape")
     @kb.add("q")
@@ -1743,7 +1765,7 @@ def main():
                     parts = user_input.split()
 
                     # Check if user wants to browse cached news
-                    if len(parts) > 1 and parts[1].lower() in ["cached", "history", "saved"]:
+                    if len(parts) > 1 and parts[1].lower() in ["cached", "history", "saved", "list"]:
                         # Browse cached news searches
                         cache_mgr = get_news_cache_manager()
                         searches = cache_mgr.get_all_searches()
