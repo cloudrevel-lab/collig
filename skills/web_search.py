@@ -18,37 +18,40 @@ class WebSearchSkill(Skill):
 
     @property
     def description(self) -> str:
-        return "Search the web for information using DuckDuckGo. Use this for general queries, finding websites, or looking up information not covered by specialized skills like news."
+        return "Search the web for information using DuckDuckGo. Use this as the PRIMARY tool for answering questions about current events, facts, weather, news, products, people, places, or anything requiring real-time information. The agent will automatically synthesize answers from results."
 
     def get_tools(self):
         @tool
         def web_search(query: str) -> str:
             """
-            Search the web for information using DuckDuckGo.
-            Use this for general queries, finding websites, tutorials, documentation, or any information not covered by specialized skills.
+            Search the web for information - this is your PRIMARY tool for answering questions.
+            Use this for: current events, weather, news, facts, products, people, places, research, how-to guides, documentation, or ANY question requiring real-time or factual information.
+            After getting results, synthesize a natural answer from the information found.
             Args:
-                query: The search query string
+                query: The search query - use specific, focused terms for best results
             """
             try:
-                # DDGS().text returns a generator, convert to list
                 results = list(DDGS().text(query, max_results=10))
 
                 if not results:
-                    return f"No results found for '{query}'."
+                    return f"No results found for '{query}'. Try a different search term."
 
                 WebSearchSkill._search_cache = results
                 WebSearchSkill._last_query = query
                 WebSearchSkill._just_searched = True
 
-                output = [f"Found {len(results)} web results for '{query}':\n"]
+                # Format results for natural synthesis
+                output = [f"🔍 Search results for '{query}':\n"]
                 for i, item in enumerate(results, 1):
                     title = item.get('title', 'No Title')
                     href = item.get('href', '')
                     body = item.get('body', 'No description available.')
-                    output.append(f"{i}. [{title}]({href})")
-                    output.append(f"   {body}\n")
+                    source = href.split('/')[2] if href else 'Unknown'
+                    output.append(f"{i}. **{title}** ({source})")
+                    output.append(f"   {body}")
+                    output.append(f"   Source: {href}\n")
 
-                output.append("\nTo read more about a specific result, you can ask me to search for more details about it.")
+                output.append("\n💡 Tip: Synthesize these results into a helpful, natural answer for the user.")
                 return "\n".join(output)
 
             except Exception as e:
