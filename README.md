@@ -23,7 +23,7 @@ Collig is a powerful, locally-running AI agent designed to act as your personal 
     - 📝 **Notes** — Card-based layout with search, edit, and delete
     - 🎨 **Light/Dark Theme** — Toggle with persisted preference
 -   **💻 Interactive CLI:** A rich terminal interface with autocompletion, session management, history, and `/console` commands for admin console management.
--   **🛡️ Secure & Local:** Runs on your machine. Includes `backup` and `restore` commands for easy data migration.
+-   **🛡️ Secure & Local:** Runs on your machine. Includes `backup`, `restore`, and `load` commands for easy data migration.
 -   **🔄 Auto-Reload:** The admin console server automatically restarts when Python files change.
 
 ## 🛠️ Tech Stack
@@ -63,8 +63,9 @@ make pa
 **Commands:**
 -   `/exit` or `exit`: Quit the session.
 -   `/clear` or `clear`: Clear the screen.
--   `/backup`: Backup your data (config, memory, sessions) to a zip file.
--   `/restore <path>`: Restore data from a backup zip.
+-   `/backup`: Backup your data (config, memory, sessions, bookmarks, notes, diary) to a zip file.
+-   `/restore <path>`: Restore data from a backup zip (overwrites existing data).
+-   `/load <path>`: Load and merge data from a backup zip (preserves existing entries, only adds new ones).
 -   `/config`: Interactive configuration manager.
 -   `/stats`: View token usage statistics.
 -   `/status`: Check system status and LLM connection.
@@ -97,6 +98,26 @@ Resume a session:
 ```bash
 make pa session=<SESSION_ID>
 ```
+
+## 📦 Data Migration Between Devices
+
+To transfer your Collig data (sessions, bookmarks, notes, diary entries) between devices:
+
+### On Source Device (Export)
+1. Run `make pa` to start the CLI
+2. Type `/backup` to create a backup zip file
+3. The backup will be saved as `collig_backup_YYYYMMDD_HHMMSS.zip` in the current directory
+4. Transfer this zip file to your target device (via USB, cloud storage, etc.)
+
+### On Target Device (Import)
+1. Copy the backup zip file to your target device
+2. Run `make pa` to start the CLI
+3. Use `/load <path_to_backup.zip>` to merge the data
+   - This preserves existing entries and only adds new ones
+   - Sessions, bookmarks, notes, and diary entries are intelligently merged
+   - Duplicate entries (by ID) are skipped
+
+**Note:** If you want to completely overwrite existing data instead of merging, use `/restore <path>` instead.
 
 ## 🧩 Adding Skills
 

@@ -49,8 +49,9 @@ class SkillCommandCompleter(Completer):
             ("config list", "Show current configuration"),
             ("config set", "Set a configuration value"),
             ("backup", "Backup user data to a zip file"),
-            ("restore", "Restore user data from a zip file"),
-            ("provider", "Switch LLM provider (openai/ollama/llama/deepseek/dashscope)"),
+            ("restore", "Restore user data from a zip file (overwrite)"),
+            ("load", "Load and merge data from a backup zip file (preserves existing)"),
+            ("provider", "Switch LLM provider (openai/ollama/llama/deepseek)"),
             ("news", "Open interactive news browser (if news was searched)"),
             ("news cached", "Browse saved news searches"),
             ("news history", "Browse saved news searches"),
@@ -440,7 +441,7 @@ def handle_backup_command():
         console.print(f"[bold red]Backup failed:[/bold red] {e}")
 
 def handle_restore_command(command_parts):
-    """Restores user data from a zip file."""
+    """Restores user data from a zip file (overwrite mode)."""
     if len(command_parts) < 2:
         console.print("Usage: /restore [path_to_zip_file]")
         return
@@ -469,6 +470,259 @@ def handle_restore_command(command_parts):
         console.print("[green]Restore successful! Please restart the application to apply changes.[/green]")
     except Exception as e:
         console.print(f"[bold red]Restore failed:[/bold red] {e}")
+
+def handle_load_command(command_parts):
+    """Loads/merges data from a backup zip file without overwriting existing data."""
+    if len(command_parts) < 2:
+        console.print("Usage: /load [path_to_zip_file]")
+        console.print("This will merge sessions, bookmarks, notes, and diary entries from the backup.")
+        console.print("Existing data will be preserved; only new entries will be added.")
+        return
+
+    zip_path = command_parts[1]
+
+    # Handle home directory expansion and absolute paths
+    zip_path = os.path.abspath(os.path.expanduser(zip_path))
+
+    if not os.path.exists(zip_path):
+        console.print(f"[bold red]Error:[/bold red] File not found: {zip_path}")
+        return
+
+    if not zipfile.is_zipfile(zip_path):
+        console.print(f"[bold red]Error:[/bold red] Not a valid zip file: {zip_path}")
+        return
+
+    if not Confirm.ask(f"Load and merge data from {zip_path}? Existing entries will be preserved."):
+        console.print("[yellow]Load cancelled.[/yellow]")
+        return
+
+    console.print("[bold]Loading and merging data...[/bold]")
+    
+    try:
+        import tempfile
+        import uuid
+        
+        # Try to import ChromaDB utilities for merging
+        try:
+            from langchain_chroma import Chroma
+            from langchain_openai import OpenAIEmbeddings
+            from langchain_core.documents import Document
+            CHROMA_AVAILABLE = True
+        except ImportError:
+            CHROMA_AVAILABLE = False
+            console.print("[yellow]Warning: ChromaDB not available, skipping vector store merge.[/yellow]")
+        
+        # Create a temporary directory to extract the backup
+        temp_dir = tempfile.mkdtemp(prefix="collig_load_")
+        console.print(f"[dim]Extracting backup to temporary directory...[/dim]")
+        
+        with zipfile.ZipFile(zip_path, 'r') as zipf:
+            zipf.extractall(temp_dir)
+        
+        # Find the extracted .collig directory
+        extracted_collig = None
+        for item in os.listdir(temp_dir):
+            if item == ".collig" or item.endswith(".collig"):
+                extracted_collig = os.path.join(temp_dir, item)
+                break
+        
+        # If not found, the backup might be the contents directly
+        if not extracted_collig:
+            # Check if we have data/sessions dirs directly in temp_dir
+            if os.path.exists(os.path.join(temp_dir, "data")) or os.path.exists(os.path.join(temp_dir, "sessions")):
+                extracted_collig = temp_dir
+            else:
+                console.print("[bold red]Error:[/bold red] Could not find .collig data in backup file.")
+                shutil.rmtree(temp_dir)
+                return
+        
+        merged_count = {"sessions": 0, "bookmarks": 0, "notes": 0, "diary": 0, "config": 0}
+        
+        # 1. Merge Sessions (JSON files) - skip existing IDs
+        source_sessions = os.path.join(extracted_collig, "sessions")
+        if os.path.exists(source_sessions):
+            console.print("[dim]Merging sessions...[/dim]")
+            for fname in os.listdir(source_sessions):
+                if fname.endswith(".json") and not fname.endswith("_stats.json"):
+                    src_path = os.path.join(source_sessions, fname)
+                    dst_path = os.path.join(paths.sessions_dir, fname)
+                    
+                    # Skip if already exists
+                    if os.path.exists(dst_path):
+                        continue
+                    
+                    # Copy new session
+                    shutil.copy2(src_path, dst_path)
+                    merged_count["sessions"] += 1
+                    
+                    # Also copy stats if available
+                    stats_fname = fname.replace(".json", "_stats.json")
+                    src_stats = os.path.join(source_sessions, stats_fname)
+                    if os.path.exists(src_stats):
+                        shutil.copy2(src_stats, os.path.join(paths.sessions_dir, stats_fname))
+        
+        # 2. Merge ChromaDB data (bookmarks, notes, diary, memory_notes)
+        if CHROMA_AVAILABLE:
+            source_data = os.path.join(extracted_collig, "data")
+            if os.path.exists(source_data):
+                # Get API key for embeddings
+                api_key = os.getenv("OPENAI_API_KEY", "")
+                if not api_key:
+                    try:
+                        with open(paths.global_config_file, "r") as f:
+                            config = json.load(f)
+                            api_key = config.get("OPENAI_API_KEY", "")
+                    except:
+                        pass
+                
+                if api_key:
+                    embeddings = OpenAIEmbeddings(api_key=api_key)
+                    
+                    # Merge bookmarks
+                    source_bookmarks = os.path.join(source_data, "bookmarks")
+                    if os.path.exists(source_bookmarks):
+                        try:
+                            console.print("[dim]Merging bookmarks...[/dim]")
+                            target_store = Chroma(persist_directory=paths.get_skill_data_dir("bookmarks"), 
+                                                 embedding_function=embeddings, collection_name="user_bookmarks")
+                            source_store = Chroma(persist_directory=source_bookmarks, 
+                                                 embedding_function=embeddings, collection_name="user_bookmarks")
+                            
+                            # Get all from source
+                            source_data_all = source_store._collection.get(include=["documents", "metadatas", "embeddings"])
+                            if source_data_all.get("ids"):
+                                # Get existing IDs in target
+                                target_ids = set(target_store._collection.get(include=[])["ids"])
+                                
+                                # Filter out existing
+                                new_ids = []
+                                new_docs = []
+                                new_metas = []
+                                new_embeds = []
+                                
+                                for i, doc_id in enumerate(source_data_all["ids"]):
+                                    if doc_id not in target_ids:
+                                        new_ids.append(doc_id)
+                                        new_docs.append(source_data_all["documents"][i])
+                                        new_metas.append(source_data_all["metadatas"][i])
+                                        if "embeddings" in source_data_all and source_data_all["embeddings"]:
+                                            new_embeds.append(source_data_all["embeddings"][i])
+                                
+                                if new_ids:
+                                    # Add with embeddings if available
+                                    if new_embeds:
+                                        target_store._collection.add(ids=new_ids, documents=new_docs, 
+                                                                   metadatas=new_metas, embeddings=new_embeds)
+                                    else:
+                                        target_store._collection.add(ids=new_ids, documents=new_docs, metadatas=new_metas)
+                                    merged_count["bookmarks"] = len(new_ids)
+                        except Exception as e:
+                            console.print(f"[dim]Bookmark merge skipped: {e}[/dim]")
+                    
+                    # Merge memory_notes
+                    source_memory = os.path.join(source_data, "memory_notes")
+                    if os.path.exists(source_memory):
+                        try:
+                            console.print("[dim]Merging notes...[/dim]")
+                            target_store = Chroma(persist_directory=paths.get_skill_data_dir("memory_notes"), 
+                                                 embedding_function=embeddings, collection_name="user_memory")
+                            source_store = Chroma(persist_directory=source_memory, 
+                                                 embedding_function=embeddings, collection_name="user_memory")
+                            
+                            source_data_all = source_store._collection.get(include=["documents", "metadatas", "embeddings"])
+                            if source_data_all.get("ids"):
+                                target_ids = set(target_store._collection.get(include=[])["ids"])
+                                
+                                new_ids = []
+                                new_docs = []
+                                new_metas = []
+                                new_embeds = []
+                                
+                                for i, doc_id in enumerate(source_data_all["ids"]):
+                                    if doc_id not in target_ids:
+                                        new_ids.append(doc_id)
+                                        new_docs.append(source_data_all["documents"][i])
+                                        new_metas.append(source_data_all["metadatas"][i])
+                                        if "embeddings" in source_data_all and source_data_all["embeddings"]:
+                                            new_embeds.append(source_data_all["embeddings"][i])
+                                
+                                if new_ids:
+                                    if new_embeds:
+                                        target_store._collection.add(ids=new_ids, documents=new_docs, 
+                                                                   metadatas=new_metas, embeddings=new_embeds)
+                                    else:
+                                        target_store._collection.add(ids=new_ids, documents=new_docs, metadatas=new_metas)
+                                    merged_count["notes"] = len(new_ids)
+                        except Exception as e:
+                            console.print(f"[dim]Notes merge skipped: {e}[/dim]")
+                    
+                    # Merge diary
+                    source_diary = os.path.join(source_data, "diary")
+                    if os.path.exists(source_diary):
+                        try:
+                            console.print("[dim]Merging diary entries...[/dim]")
+                            target_store = Chroma(persist_directory=paths.get_skill_data_dir("diary"), 
+                                                 embedding_function=embeddings, collection_name="user_diary")
+                            source_store = Chroma(persist_directory=source_diary, 
+                                                 embedding_function=embeddings, collection_name="user_diary")
+                            
+                            source_data_all = source_store._collection.get(include=["documents", "metadatas", "embeddings"])
+                            if source_data_all.get("ids"):
+                                target_ids = set(target_store._collection.get(include=[])["ids"])
+                                
+                                new_ids = []
+                                new_docs = []
+                                new_metas = []
+                                new_embeds = []
+                                
+                                for i, doc_id in enumerate(source_data_all["ids"]):
+                                    if doc_id not in target_ids:
+                                        new_ids.append(doc_id)
+                                        new_docs.append(source_data_all["documents"][i])
+                                        new_metas.append(source_data_all["metadatas"][i])
+                                        if "embeddings" in source_data_all and source_data_all["embeddings"]:
+                                            new_embeds.append(source_data_all["embeddings"][i])
+                                
+                                if new_ids:
+                                    if new_embeds:
+                                        target_store._collection.add(ids=new_ids, documents=new_docs, 
+                                                                   metadatas=new_metas, embeddings=new_embeds)
+                                    else:
+                                        target_store._collection.add(ids=new_ids, documents=new_docs, metadatas=new_metas)
+                                    merged_count["diary"] = len(new_ids)
+                        except Exception as e:
+                            console.print(f"[dim]Diary merge skipped: {e}[/dim]")
+                else:
+                    console.print("[yellow]Warning: OPENAI_API_KEY not available, skipping vector store merge.[/yellow]")
+            else:
+                console.print("[dim]No data directory found in backup.[/dim]")
+        else:
+            console.print("[yellow]ChromaDB not available, skipping intelligent merge of vector stores.[/yellow]")
+        
+        # Cleanup temp directory
+        shutil.rmtree(temp_dir)
+        
+        # Report results
+        console.print("[green]Load completed![/green]")
+        if any(v > 0 for v in merged_count.values()):
+            console.print("[green]Merged:[/green]")
+            if merged_count["sessions"] > 0:
+                console.print(f"  - {merged_count['sessions']} new sessions")
+            if merged_count["bookmarks"] > 0:
+                console.print(f"  - {merged_count['bookmarks']} new bookmarks")
+            if merged_count["notes"] > 0:
+                console.print(f"  - {merged_count['notes']} new notes")
+            if merged_count["diary"] > 0:
+                console.print(f"  - {merged_count['diary']} new diary entries")
+        else:
+            console.print("[yellow]No new data to merge (all entries already exist).[/yellow]")
+        
+        console.print("[dim]Tip: Use /stats to see updated session counts.[/dim]")
+        
+    except Exception as e:
+        console.print(f"[bold red]Load failed:[/bold red] {e}")
+        import traceback
+        console.print(traceback.format_exc())
 
 def get_config_schema(agent=None):
     """
@@ -1475,6 +1729,10 @@ def main():
 
             if user_input.startswith("restore"):
                 handle_restore_command(user_input.split())
+                continue
+
+            if user_input.startswith("load"):
+                handle_load_command(user_input.split())
                 continue
 
             if user_input.startswith("news"):

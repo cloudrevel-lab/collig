@@ -24,6 +24,7 @@ from skills.cache import CacheSkill
 from skills.lunar_calendar import LunarCalendarSkill
 from skills.menu import MenuSkill
 from skills.survey import SurveySkill
+from skills.diary import DiarySkill
 from core.session import SessionManager
 from core.paths import paths
 
@@ -70,6 +71,7 @@ _TOOL_KEYWORDS = {
     'menu': ['menu', 'select from', 'choose from'],
     'survey': ['survey', 'questionnaire', 'form'],
     'thinking': ['hide thinking', 'show thinking', 'toggle thinking'],
+    'diary': ['diary', 'create a diary', 'diary entry', 'my diary'],
 }
 
 
@@ -352,6 +354,7 @@ def _filter_tools_for_message(message: str, all_tools: list) -> list:
         'menu': ['select_from_menu', 'select_option_by_number'],
         'survey': ['load_survey', 'continue_survey'],
         'thinking': ['hide_thinking', 'show_thinking', 'toggle_thinking'],
+        'diary': ['create_diary', 'list_diary_entries', 'search_diary', 'search_diary_by_date', 'delete_diary_entry'],
     }
 
     # Collect matching tool names
@@ -531,6 +534,7 @@ class Agent:
         self.skill_manager.register_skill(LunarCalendarSkill())
         self.skill_manager.register_skill(MenuSkill())
         self.skill_manager.register_skill(SurveySkill())
+        self.skill_manager.register_skill(DiarySkill())
         # self.skill_manager.register_skill(ChatSkill()) # Fallback / General Skill
 
     def _init_langchain_agent(self):

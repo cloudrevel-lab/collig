@@ -73,6 +73,12 @@ class NoteCreate(BaseModel):
 class NoteUpdate(BaseModel):
     content: str | None = None
 
+class DiaryEntryCreate(BaseModel):
+    content: str
+
+class DiaryEntryUpdate(BaseModel):
+    content: str | None = None
+
 
 # ─── Helper: get skill instances ───────────────────────────────────────────────
 
@@ -87,6 +93,13 @@ def _get_memory_skill():
     """Find the MemorySkill from the agent's registered skills."""
     for skill in agent.skill_manager.skills:
         if skill.name == "Memory & Notes":
+            return skill
+    return None
+
+def _get_diary_skill():
+    """Find the DiarySkill from the agent's registered skills."""
+    for skill in agent.skill_manager.skills:
+        if skill.name == "Diary":
             return skill
     return None
 
@@ -125,6 +138,29 @@ def _get_all_bookmarks():
 def _get_all_notes():
     """Retrieve all notes from ChromaDB."""
     skill = _get_memory_skill()
+    if not skill or not skill.vectorstore:
+        return []
+    try:
+        collection = skill.vectorstore._collection
+        data = collection.get(include=["documents", "metadatas"])
+        docs = data.get("documents", [])
+        metas = data.get("metadatas", [])
+        ids = data.get("ids", [])
+        results = []
+        for d, m, i in zip(docs, metas, ids):
+            results.append({
+                "id": i,
+                "content": d,
+                "timestamp": m.get("timestamp", ""),
+            })
+        results.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+        return results
+    except Exception as e:
+        return []
+
+def _get_all_diary_entries():
+    """Retrieve all diary entries from ChromaDB."""
+    skill = _get_diary_skill()
     if not skill or not skill.vectorstore:
         return []
     try:
@@ -308,6 +344,69 @@ def update_note(note_id: str, note: NoteUpdate):
         meta = {"timestamp": old_meta.get("timestamp", datetime.datetime.now().isoformat()), "type": "user_note"}
         skill.vectorstore.add_documents([Document(page_content=new_content, metadata=meta)])
         return {"message": "Note updated"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ─── Diary API ──────────────────────────────────────────────────────────────────
+
+@app.get("/api/diary")
+def list_diary():
+    """List all diary entries."""
+    try:
+        entries = _get_all_diary_entries()
+        return {"entries": entries, "total": len(entries)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/diary", status_code=201)
+def create_diary_entry(entry: DiaryEntryCreate):
+    """Create a new diary entry."""
+    skill = _get_diary_skill()
+    if not skill or not skill.vectorstore:
+        raise HTTPException(status_code=503, detail="Diary system not initialized. Check OPENAI_API_KEY.")
+    try:
+        from langchain_core.documents import Document
+        meta = {"timestamp": datetime.datetime.now().isoformat(), "type": "diary_entry"}
+        skill.vectorstore.add_documents([Document(page_content=entry.content, metadata=meta)])
+        return {"message": "Diary entry created"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/diary/{entry_id}")
+def delete_diary_entry(entry_id: str):
+    """Delete a diary entry by ID."""
+    skill = _get_diary_skill()
+    if not skill or not skill.vectorstore:
+        raise HTTPException(status_code=503, detail="Diary system not initialized.")
+    try:
+        skill.vectorstore.delete(ids=[entry_id])
+        return {"message": "Diary entry deleted"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/diary/{entry_id}")
+def update_diary_entry(entry_id: str, entry: DiaryEntryUpdate):
+    """Update a diary entry."""
+    skill = _get_diary_skill()
+    if not skill or not skill.vectorstore:
+        raise HTTPException(status_code=503, detail="Diary system not initialized.")
+    try:
+        existing = skill.vectorstore._collection.get(ids=[entry_id], include=["documents", "metadatas"])
+        if not existing.get("ids"):
+            raise HTTPException(status_code=404, detail="Diary entry not found")
+
+        old_content = existing["documents"][0]
+        old_meta = existing["metadatas"][0]
+        new_content = entry.content if entry.content is not None else old_content
+
+        skill.vectorstore.delete(ids=[entry_id])
+        from langchain_core.documents import Document
+        meta = {"timestamp": old_meta.get("timestamp", datetime.datetime.now().isoformat()), "type": "diary_entry"}
+        skill.vectorstore.add_documents([Document(page_content=new_content, metadata=meta)])
+        return {"message": "Diary entry updated"}
     except HTTPException:
         raise
     except Exception as e:

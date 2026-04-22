@@ -54,6 +54,7 @@ const menuItems = [
   { title: 'Sessions', icon: 'mdi-format-list-bulleted', route: '/sessions' },
   { title: 'Bookmarks', icon: 'mdi-bookmark', route: '/bookmarks' },
   { title: 'Notes', icon: 'mdi-note-text', route: '/notes' },
+  { title: 'Diary', icon: 'mdi-book-open-page-variant', route: '/diary' },
 ]
 
 const currentTitle = computed(() => {
