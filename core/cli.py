@@ -1804,16 +1804,9 @@ def main():
                             NewsSkill._last_query = entry.query
                             NewsSkill._just_searched = True
                             console.print(f"[green]Loaded: {entry.query}[/green]")
-                            # Open the news menu for this search
-                            try:
-                                while True:
-                                    news_action = interactive_news_menu(entry.news_items, entry.query)
-                                    if news_action:
-                                        handle_news_action(news_action, agent)
-                                    else:
-                                        break
-                            except Exception as e:
-                                console.print(f"[red]Error in news menu: {e}[/red]")
+                            # Exit the current menu and let the main loop open the news browser
+                            # We set a flag to indicate we want to open news browser after exiting
+                            return {"open_news_browser": True, "news_items": entry.news_items, "query": entry.query}
 
                         cache_menu.add_action(MenuAction(
                             key="l",
@@ -1831,6 +1824,7 @@ def main():
                                 cache_menu.items.pop(index)
                                 if cache_menu.selected_index >= len(cache_menu.items):
                                     cache_menu.selected_index = max(0, len(cache_menu.items) - 1)
+                            return None
 
                         cache_menu.add_action(MenuAction(
                             key="d",
@@ -1840,7 +1834,18 @@ def main():
                         ))
 
                         # Run the menu
-                        cache_menu.run()
+                        load_result = cache_menu.run()
+                        
+                        # If user loaded a news search, open the news browser
+                        if load_result and isinstance(load_result, dict) and load_result.get("open_news_browser"):
+                            news_items = load_result["news_items"]
+                            news_query = load_result["query"]
+                            while True:
+                                news_action = interactive_news_menu(news_items, news_query)
+                                if news_action:
+                                    handle_news_action(news_action, agent)
+                                else:
+                                    break
                         continue
 
                     # Regular news menu for current search
