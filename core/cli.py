@@ -2328,20 +2328,31 @@ def main():
                 # Check if news was just searched - open interactive menu directly
                 try:
                     from skills.news import NewsSkill
+                    news_cache = NewsSkill.get_news_cache()
+                    
+                    # Open news browser if:
+                    # 1. NewsSkill flag is set (search_news tool was called), OR
+                    # 2. There are news items in cache and response mentions news items
+                    should_open_news_menu = False
+                    
                     if NewsSkill.has_just_searched():
                         NewsSkill.clear_search_flag()
-                        news_cache = NewsSkill.get_news_cache()
-                        if news_cache:
-                            console.print()
-                            news_query = NewsSkill.get_last_query()
-                            # Keep menu open until user quits
-                            while True:
-                                news_action = interactive_news_menu(news_cache, news_query)
-                                if news_action:
-                                    handle_news_action(news_action, agent)
-                                else:
-                                    # User quit the menu
-                                    break
+                        should_open_news_menu = True
+                    elif news_cache and result and "news" in result.get("response", "").lower():
+                        # Agent mentioned news in response, check if we have cached items
+                        should_open_news_menu = True
+                    
+                    if should_open_news_menu and news_cache:
+                        console.print()
+                        news_query = NewsSkill.get_last_query() or "news"
+                        # Keep menu open until user quits
+                        while True:
+                            news_action = interactive_news_menu(news_cache, news_query)
+                            if news_action:
+                                handle_news_action(news_action, agent)
+                            else:
+                                # User quit the menu
+                                break
                 except Exception as e:
                     # If news menu fails, just continue quietly
                     pass
