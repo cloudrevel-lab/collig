@@ -162,84 +162,84 @@ class InteractiveMenu:
             return None
 
         self._running = True
+        result = None
 
-        while self._running:
-            kb = KeyBindings()
+        kb = KeyBindings()
 
-            @kb.add("up")
-            @kb.add("k")
-            def move_up(event):
-                if self.mode == "list":
-                    self.selected_index = (self.selected_index - 1) % len(self.items)
-                    menu_control.text = self._get_list_text()
+        # Create key bindings once, outside the application loop
+        @kb.add("up")
+        @kb.add("k")
+        def move_up(event):
+            if self.mode == "list":
+                self.selected_index = (self.selected_index - 1) % len(self.items)
+                menu_control.text = self._get_list_text()
 
-            @kb.add("down")
-            @kb.add("j")
-            def move_down(event):
-                if self.mode == "list":
-                    self.selected_index = (self.selected_index + 1) % len(self.items)
-                    menu_control.text = self._get_list_text()
+        @kb.add("down")
+        @kb.add("j")
+        def move_down(event):
+            if self.mode == "list":
+                self.selected_index = (self.selected_index + 1) % len(self.items)
+                menu_control.text = self._get_list_text()
 
-            @kb.add("enter")
-            def view_detail(event):
-                if self.mode == "list" and self.show_detail:
-                    self.mode = "detail"
-                    menu_control.text = self._get_detail_text()
+        @kb.add("enter")
+        def view_detail(event):
+            if self.mode == "list" and self.show_detail:
+                self.mode = "detail"
+                menu_control.text = self._get_detail_text()
 
-            @kb.add("b")
-            def back_to_list(event):
-                if self.mode == "detail":
-                    self.mode = "list"
-                    menu_control.text = self._get_list_text()
+        @kb.add("b")
+        def back_to_list(event):
+            if self.mode == "detail":
+                self.mode = "list"
+                menu_control.text = self._get_list_text()
 
-            @kb.add("escape")
-            @kb.add("q")
-            def quit_menu(event):
-                self._running = False
-                event.app.exit(result=None)
+        @kb.add("escape")
+        @kb.add("q")
+        def quit_menu(event):
+            self._running = False
+            event.app.exit(result=None)
 
-            @kb.add("c-c")
-            def ctrl_c(event):
-                self._running = False
-                event.app.exit(result=None)
+        @kb.add("c-c")
+        def ctrl_c(event):
+            self._running = False
+            event.app.exit(result=None)
 
-            # Add custom action key bindings
-            for action in self.actions:
-                @kb.add(action.key)
-                def make_action_handler(a=action):
-                    def handler(event):
-                        item = self.items[self.selected_index]
-                        result = a.callback(item, self.selected_index)
-                        if not self.stay_open:
-                            self._running = False
-                            event.app.exit(result=result)
-                        else:
-                            # Just refresh the display
-                            if self.mode == "list":
-                                menu_control.text = self._get_list_text()
-                            else:
-                                menu_control.text = self._get_detail_text()
-                    return handler
+        # Add custom action key bindings
+        def make_action_handler(action):
+            def handler(event):
+                nonlocal result
+                item = self.items[self.selected_index]
+                result = action.callback(item, self.selected_index)
+                if not self.stay_open:
+                    self._running = False
+                    event.app.exit(result=result)
+                else:
+                    # Just refresh the display
+                    if self.mode == "list":
+                        menu_control.text = self._get_list_text()
+                    else:
+                        menu_control.text = self._get_detail_text()
+            return handler
 
-            menu_control = FormattedTextControl(text=self._get_list_text())
-            window = Window(
-                content=menu_control,
-                width=Dimension(min=60, preferred=90),
-                height=Dimension(min=15, preferred=25)
-            )
+        for action in self.actions:
+            kb.add(action.key)(make_action_handler(action))
 
-            layout = Layout(HSplit([window]))
-            app = Application(layout=layout, key_bindings=kb, full_screen=False)
+        menu_control = FormattedTextControl(text=self._get_list_text())
+        window = Window(
+            content=menu_control,
+            width=Dimension(min=60, preferred=90),
+            height=Dimension(min=15, preferred=25)
+        )
 
-            try:
-                result = app.run()
-                if not self._running:
-                    return result
-            except Exception as e:
-                print(f"[dim]Menu error: {e}[/dim]")
-                return None
+        layout = Layout(HSplit([window]))
+        app = Application(layout=layout, key_bindings=kb, full_screen=False)
 
-        return None
+        try:
+            app.run()
+        except Exception as e:
+            print(f"[dim]Menu error: {e}[/dim]")
+
+        return result
 
 
 def create_simple_menu(
