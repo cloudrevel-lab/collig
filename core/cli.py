@@ -1777,6 +1777,9 @@ def main():
                         # Create menu for cached searches
                         from core.menu import InteractiveMenu, MenuItem, MenuAction
 
+                        # Track which item to load after menu exits
+                        load_after_exit = None
+
                         # Convert to menu items
                         menu_items = []
                         for entry in searches:
@@ -1793,38 +1796,16 @@ def main():
                             title="📰 Saved News Searches",
                             subtitle="Select a search to load",
                             items=menu_items,
-                            stay_open=True
+                            stay_open=False  # Exit after selection
                         )
-
-                        # Add "Load" action
-                        def load_search_action(item: MenuItem, index: int):
-                            entry = item.data
-                            # Load the news into NewsSkill
-                            NewsSkill._news_cache = entry.news_items
-                            NewsSkill._last_query = entry.query
-                            NewsSkill._just_searched = True
-                            console.print(f"[green]Loaded: {entry.query}[/green]")
-                            # Exit the current menu and let the main loop open the news browser
-                            # We set a flag to indicate we want to open news browser after exiting
-                            return {"open_news_browser": True, "news_items": entry.news_items, "query": entry.query}
-
-                        cache_menu.add_action(MenuAction(
-                            key="l",
-                            label="Load",
-                            callback=load_search_action,
-                            modes=["list", "detail"]
-                        ))
 
                         # Add "Delete" action
                         def delete_search_action(item: MenuItem, index: int):
                             entry = item.data
                             if cache_mgr.delete_search(entry.cache_id):
                                 console.print(f"[yellow]Deleted: {entry.query}[/yellow]")
-                                # Remove from current menu items too
-                                cache_menu.items.pop(index)
-                                if cache_menu.selected_index >= len(cache_menu.items):
-                                    cache_menu.selected_index = max(0, len(cache_menu.items) - 1)
-                            return None
+                            # Don't remove from list - just exit and refresh
+                            return "delete"
 
                         cache_menu.add_action(MenuAction(
                             key="d",
@@ -1834,14 +1815,20 @@ def main():
                         ))
 
                         # Run the menu
-                        load_result = cache_menu.run()
+                        result = cache_menu.run()
                         
-                        # If user loaded a news search, open the news browser
-                        if load_result and isinstance(load_result, dict) and load_result.get("open_news_browser"):
-                            news_items = load_result["news_items"]
-                            news_query = load_result["query"]
+                        # If user selected an item (Enter), load it
+                        # The selected item is stored in the menu's selected_index
+                        if cache_menu.selected_index is not None and cache_menu.selected_index < len(searches):
+                            entry = searches[cache_menu.selected_index]
+                            # Load the news into NewsSkill
+                            NewsSkill._news_cache = entry.news_items
+                            NewsSkill._last_query = entry.query
+                            NewsSkill._just_searched = True
+                            console.print(f"[green]Loaded: {entry.query}[/green]")
+                            # Open the news browser
                             while True:
-                                news_action = interactive_news_menu(news_items, news_query)
+                                news_action = interactive_news_menu(entry.news_items, entry.query)
                                 if news_action:
                                     handle_news_action(news_action, agent)
                                 else:
