@@ -7,7 +7,7 @@ import datetime
 from dateutil import parser, relativedelta
 from typing import List
 from langchain_core.tools import tool
-from ..base import Skill
+from skills.base import Skill
 
 
 class DateCalculatorSkill(Skill):

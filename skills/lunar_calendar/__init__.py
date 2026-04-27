@@ -6,7 +6,7 @@ Converts Gregorian dates to Chinese lunar calendar dates and provides zodiac inf
 import datetime
 from typing import List
 from langchain_core.tools import tool
-from ..base import Skill
+from skills.base import Skill
 
 
 class LunarCalendarSkill(Skill):

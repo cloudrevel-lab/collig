@@ -5,7 +5,7 @@ Search and browse news articles with semantic caching and search.
 """
 from typing import List, Dict, Any
 from langchain_core.tools import tool
-from ..base import Skill
+from skills.base import Skill
 from ddgs import DDGS
 
 

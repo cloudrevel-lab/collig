@@ -8,7 +8,7 @@ import requests
 import re
 from datetime import datetime, timedelta
 from langchain_core.tools import tool, BaseTool
-from ..base import Skill
+from skills.base import Skill
 
 
 class WeatherSkill(Skill):

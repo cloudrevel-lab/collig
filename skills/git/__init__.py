@@ -7,7 +7,7 @@ from typing import List, Optional
 import subprocess
 import os
 from langchain_core.tools import tool, BaseTool
-from ..base import Skill
+from skills.base import Skill
 
 
 class GitSkill(Skill):

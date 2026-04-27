@@ -7,7 +7,7 @@ import os
 import shutil
 from typing import Dict, Any, List, Optional
 from langchain_core.tools import tool, BaseTool
-from ..base import Skill
+from skills.base import Skill
 
 
 class FileSystemSkill(Skill):

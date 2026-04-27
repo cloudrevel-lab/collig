@@ -8,7 +8,7 @@ import datetime
 import subprocess
 import sys
 from langchain_core.tools import tool, BaseTool
-from ..base import Skill
+from skills.base import Skill
 
 
 class SystemSkill(Skill):

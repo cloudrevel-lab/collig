@@ -9,7 +9,7 @@ import smtplib
 import email
 from email.header import decode_header
 from langchain_core.tools import tool, BaseTool
-from ..base import Skill
+from skills.base import Skill
 import os
 import datetime
 import json

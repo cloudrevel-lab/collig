@@ -7,7 +7,7 @@ import os
 import re
 from typing import Dict, Any, List
 from langchain_core.tools import tool, BaseTool
-from ..base import Skill
+from skills.base import Skill
 
 
 class ProgrammingSkill(Skill):

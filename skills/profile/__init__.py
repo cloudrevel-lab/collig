@@ -7,7 +7,7 @@ from typing import Dict, Any, List
 import os
 import datetime
 from langchain_core.tools import tool, BaseTool
-from ..base import Skill
+from skills.base import Skill
 
 try:
     from langchain_openai import OpenAIEmbeddings
