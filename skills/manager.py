@@ -32,7 +32,7 @@ class SkillManager:
     def configure(self, config: Dict[str, Any]):
         """
         Configure the skill manager with settings.
-        
+
         Args:
             config: Configuration dictionary
         """
@@ -44,9 +44,28 @@ class SkillManager:
         if not self.client:
             try:
                 from openai import OpenAI
-                api_key = config.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+                # Get API key based on provider
+                llm_provider = config.get("LLM_PROVIDER", "openai")
+                api_key = None
+                base_url = None
+
+                if llm_provider == "dashscope":
+                    api_key = config.get("DASHSCOPE_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
+                    endpoint_region = config.get("DASHSCOPE_ENDPOINT", "china")
+                    endpoints = {
+                        "china": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                        "singapore": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+                        "international": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+                    }
+                    base_url = endpoints.get(endpoint_region, endpoints["china"])
+                else:
+                    api_key = config.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+
                 if api_key:
-                    self.client = OpenAI(api_key=api_key)
+                    if base_url:
+                        self.client = OpenAI(api_key=api_key, base_url=base_url)
+                    else:
+                        self.client = OpenAI(api_key=api_key)
             except ImportError:
                 pass
 

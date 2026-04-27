@@ -27,10 +27,24 @@ class ProfileSkill(Skill):
         self.vectorstore = None
         self.persist_directory = None
         self.embeddings = None
+        self._initialized = False
+        # Don't initialize store here - wait for configure() to be called
+
+    def configure(self, config: Dict[str, Any]):
+        """
+        Configure the skill and initialize the vector store.
+        This is called after the skill is registered and config is available.
+        """
+        super().configure(config)
+        # Re-initialize the store with the new config
         self._initialize_store()
 
     def _initialize_store(self):
         """Initialize the vector store if configuration is available."""
+        # Avoid re-initializing if already done
+        if self._initialized and self.vectorstore is not None:
+            return
+
         llm_provider = self.config.get("LLM_PROVIDER", "openai")
 
         api_key = None
@@ -51,15 +65,16 @@ class ProfileSkill(Skill):
             api_key = self.config.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
 
         if not api_key:
+            self._initialized = True
             return
 
-        if Chroma and not self.vectorstore:
+        if Chroma:
             try:
                 if base_url:
                     self.embeddings = OpenAIEmbeddings(api_key=api_key, base_url=base_url, model=model_name)
                 else:
                     self.embeddings = OpenAIEmbeddings(api_key=api_key, model=model_name)
-                
+
                 persist_dir = self.persist_directory or os.path.join(
                     os.path.expanduser("~"), ".collig", "skills", "profile", "data"
                 )
@@ -68,8 +83,12 @@ class ProfileSkill(Skill):
                     embedding_function=self.embeddings,
                     collection_name="user_profile"
                 )
+                self._initialized = True
             except Exception as e:
                 print(f"Failed to initialize Chroma for profile: {e}")
+                self._initialized = True
+        else:
+            self._initialized = True
 
     @property
     def name(self) -> str:
