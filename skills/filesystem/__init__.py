@@ -1,17 +1,29 @@
+"""
+File System Manager Skill - Portable implementation following agentskills.io spec.
+
+Manages files and directories (create, list, delete, read, write).
+"""
 import os
 import shutil
 from typing import Dict, Any, List, Optional
 from langchain_core.tools import tool, BaseTool
-from .base import Skill
+from ..base import Skill
+
 
 class FileSystemSkill(Skill):
+    """Manages files and directories."""
+
     @property
     def name(self) -> str:
         return "File System Manager"
 
     @property
     def description(self) -> str:
-        return "Manages files and directories (create, list, delete)."
+        return "Manages files and directories (create, list, delete, read, write)"
+
+    @property
+    def triggers(self) -> List[str]:
+        return ["file", "directory", "folder", "create file", "save file", "read file"]
 
     def get_tools(self) -> List[BaseTool]:
 
@@ -25,6 +37,7 @@ class FileSystemSkill(Skill):
         def create_directory(path: str) -> str:
             """
             Creates a new directory at the specified path.
+            
             Args:
                 path: The path of the directory to create (e.g., "new_folder", "/tmp/test").
             """
@@ -39,6 +52,7 @@ class FileSystemSkill(Skill):
         def list_directory(path: Optional[str] = None) -> str:
             """
             Lists the contents of a directory.
+            
             Args:
                 path: The directory path to list. Defaults to the current working directory.
             """
@@ -68,6 +82,7 @@ class FileSystemSkill(Skill):
         def delete_item(path: str) -> str:
             """
             Deletes a file or directory.
+            
             Args:
                 path: The path of the file or directory to delete.
             """
@@ -89,6 +104,7 @@ class FileSystemSkill(Skill):
         def write_file(path: str, content: str) -> str:
             """
             Writes content to a file. Overwrites if exists.
+            
             Args:
                 path: The path of the file to write.
                 content: The text content to write.
@@ -109,6 +125,7 @@ class FileSystemSkill(Skill):
         def read_file(path: str) -> str:
             """
             Reads content from a file.
+            
             Args:
                 path: The path of the file to read.
             """

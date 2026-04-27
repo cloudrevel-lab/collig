@@ -1,21 +1,30 @@
+"""
+Survey Automator Skill - Portable implementation following agentskills.io spec.
+
+Automate online surveys using browser automation with Playwright.
+"""
 from typing import List, Dict, Any, Optional
 from langchain_core.tools import tool
 from ..base import Skill
 from playwright.sync_api import sync_playwright
 
+
 class SurveySkill(Skill):
-    """Automate online surveys"""
+    """Automate online surveys using browser automation."""
 
     _current_survey_url: Optional[str] = None
     _cookies: Optional[List[Dict]] = None
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, skill_root=None):
+        super().__init__(skill_root)
 
     def _run(self, callback):
+        """Execute a browser automation task."""
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
-            context = browser.new_context(user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+            )
             if SurveySkill._cookies:
                 context.add_cookies(SurveySkill._cookies)
             page = context.new_page()
@@ -28,12 +37,25 @@ class SurveySkill(Skill):
 
     @property
     def name(self) -> str:
-        return "SurveySkill"
+        return "Survey Automator"
+
+    @property
+    def description(self) -> str:
+        return "Automate online surveys using browser automation"
+
+    @property
+    def triggers(self) -> List[str]:
+        return ["survey", "questionnaire", "form filler"]
 
     def get_tools(self):
         @tool
         def load_survey(url: str) -> str:
-            """Load survey URL, select 'None of the above' for screening, click Next."""
+            """
+            Load survey URL, select 'None of the above' for screening, click Next.
+            
+            Args:
+                url: The survey URL to load
+            """
             try:
                 SurveySkill._current_survey_url = url
                 SurveySkill._cookies = None
@@ -50,7 +72,7 @@ class SurveySkill(Skill):
                         page.get_by_text("Next", exact=False).first.click()
                         page.wait_for_load_state("networkidle")
                         return "✅ Survey loaded, passed screening question"
-                    except:
+                    except Exception:
                         return "✅ Survey loaded (already past screening)"
 
                 return self._run(run)
@@ -59,7 +81,9 @@ class SurveySkill(Skill):
 
         @tool
         def continue_survey() -> str:
-            """Continue survey, auto-fill male/gender, postcode 2117, click Next."""
+            """
+            Continue survey, auto-fill known information (gender, postcode).
+            """
             if not SurveySkill._current_survey_url:
                 return "Load survey first"
 
@@ -72,12 +96,17 @@ class SurveySkill(Skill):
                     try:
                         # Sex/gender = male
                         page.get_by_text("Male", exact=False).first.click()
-                    except: pass
+                    except Exception:
+                        pass
 
                     try:
                         # Postcode = 2117
-                        page.get_by_role("textbox", name=lambda x: x and "post" in x.lower() or "zip" in x.lower()).first.fill("2117")
-                    except: pass
+                        page.get_by_role(
+                            "textbox",
+                            name=lambda x: x and ("post" in x.lower() or "zip" in x.lower())
+                        ).first.fill("2117")
+                    except Exception:
+                        pass
 
                     # Click Next
                     try:
@@ -85,7 +114,7 @@ class SurveySkill(Skill):
                         page.wait_for_load_state("networkidle")
                         SurveySkill._current_survey_url = page.url
                         return "✅ Moved to next page"
-                    except:
+                    except Exception:
                         return "✅ Page processed"
 
                 return self._run(run)

@@ -1,11 +1,21 @@
-from typing import Dict, Any, List
+"""
+System Info Skill - Portable implementation following agentskills.io spec.
+
+Provides system status, uptime, and package management capabilities.
+"""
+from typing import List
 import datetime
+import subprocess
+import sys
 from langchain_core.tools import tool, BaseTool
-from .base import Skill
+from ..base import Skill
+
 
 class SystemSkill(Skill):
-    def __init__(self):
-        super().__init__()
+    """Provides system information and management capabilities."""
+
+    def __init__(self, skill_root=None):
+        super().__init__(skill_root)
         self.start_time = datetime.datetime.now()
 
     @property
@@ -14,10 +24,14 @@ class SystemSkill(Skill):
 
     @property
     def description(self) -> str:
-        return "Provides information about the system status and agent configuration."
+        return "Provides system status, uptime, and package management"
+
+    @property
+    def triggers(self) -> List[str]:
+        return ["system status", "uptime", "install package", "clear conversation", "system info"]
 
     def get_tools(self) -> List[BaseTool]:
-        
+
         @tool
         def get_system_status() -> str:
             """
@@ -30,25 +44,15 @@ class SystemSkill(Skill):
         def clear_conversation(session_id: str = None) -> str:
             """
             Clears the current conversation history/memory.
-            Use this when the user asks to "delete conversation", "clean history", or "start over".
-            The session_id should be retrieved from the context if possible, otherwise it will try to find it.
+            
+            Args:
+                session_id: Optional session ID (extracted from context if not provided)
             """
-            # Accessing session_manager is tricky here because Skill is isolated.
-            # However, we can use the 'runtime_context' passed during execution if we architect it that way.
-            # OR, we can instantiate a SessionManager here (since it works on file system).
-            from session import SessionManager
-            
-            # How do we get the session_id? 
-            # The agent injects it into the system prompt, but tools don't automatically get it unless passed as arg.
-            # We can ask the LLM to extract it from context?
-            # Or better, we can assume the agent passes it?
-            # Actually, the most robust way is to require session_id as an argument, 
-            # and the LLM will extract it from the "Current Session ID: ..." system message we injected!
-            
             if not session_id:
                 return "Error: Session ID is required to clear conversation."
-                
+
             try:
+                from session import SessionManager
                 manager = SessionManager()
                 manager.clear_history(session_id)
                 return "Conversation history has been cleared."
@@ -58,29 +62,24 @@ class SystemSkill(Skill):
         @tool
         def install_package(package_name: str) -> str:
             """
-            Installs a system package using apt-get (requires sudo/root).
-            Use this to install missing software or dependencies.
-            Example: install_package("w3m") or install_package("chromium-browser")
-            """
-            import subprocess
-            import sys
+            Installs a system package using apt-get.
             
+            Args:
+                package_name: Name of the package to install
+            """
             if not sys.platform.startswith("linux"):
-                 return "Error: Package installation is only supported on Linux."
+                return "Error: Package installation is only supported on Linux."
 
             try:
-                # Update apt-get first? Maybe too slow.
-                # Just try install.
-                # -y to answer yes automatically
                 cmd = ["sudo", "apt-get", "install", "-y", package_name]
-                
+
                 result = subprocess.run(
                     cmd,
                     capture_output=True,
                     text=True,
                     check=False
                 )
-                
+
                 if result.returncode == 0:
                     return f"Successfully installed {package_name}.\nOutput: {result.stdout}"
                 else:
@@ -88,4 +87,4 @@ class SystemSkill(Skill):
             except Exception as e:
                 return f"Error executing installation: {str(e)}"
 
-        return [get_system_status, install_package]
+        return [get_system_status, clear_conversation, install_package]

@@ -1,9 +1,13 @@
-from typing import Dict, Any, List, Optional
+"""
+Personal Profile Skill - Portable implementation following agentskills.io spec.
+
+Stores and retrieves personal information about the user using vector embeddings.
+"""
+from typing import Dict, Any, List
 import os
 import datetime
 from langchain_core.tools import tool, BaseTool
-from .base import Skill
-from core.paths import paths
+from ..base import Skill
 
 try:
     from langchain_openai import OpenAIEmbeddings
@@ -12,36 +16,27 @@ try:
 except ImportError:
     Chroma = None
     OpenAIEmbeddings = None
+    Document = None
+
 
 class ProfileSkill(Skill):
-    def __init__(self):
-        super().__init__()
-        self.vectorstore = None
-        # Use centralized data directory
-        self.persist_directory = paths.get_skill_data_dir("personal_profile")
-        
-        # Ensure data directory exists
-        # os.makedirs(self.persist_directory, exist_ok=True) # Handled by paths
+    """Stores and retrieves personal information about the user."""
 
+    def __init__(self, skill_root=None):
+        super().__init__(skill_root)
+        self.vectorstore = None
+        self.persist_directory = None
+        self.embeddings = None
         self._initialize_store()
 
-    @property
-    def name(self) -> str:
-        return "Personal Profile"
-
-    @property
-    def description(self) -> str:
-        return "Stores and retrieves personal information about the user (location, preferences, habits, etc.)."
-
     def _initialize_store(self):
-        """Attempts to initialize the vector store if configuration is available."""
-        # Determine which provider is being used
+        """Initialize the vector store if configuration is available."""
         llm_provider = self.config.get("LLM_PROVIDER", "openai")
-        
-        # Get API key and endpoint based on provider
+
         api_key = None
         base_url = None
-        
+        model_name = "text-embedding-ada-002"
+
         if llm_provider == "dashscope":
             api_key = self.config.get("DASHSCOPE_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
             endpoint_region = self.config.get("DASHSCOPE_ENDPOINT", "china")
@@ -54,25 +49,39 @@ class ProfileSkill(Skill):
             model_name = "text-embedding-v2"
         else:
             api_key = self.config.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
-            model_name = "text-embedding-ada-002"
 
         if not api_key:
             return
 
-        # Initialize Vector Store
         if Chroma and not self.vectorstore:
             try:
                 if base_url:
                     self.embeddings = OpenAIEmbeddings(api_key=api_key, base_url=base_url, model=model_name)
                 else:
                     self.embeddings = OpenAIEmbeddings(api_key=api_key, model=model_name)
+                
+                persist_dir = self.persist_directory or os.path.join(
+                    os.path.expanduser("~"), ".collig", "skills", "profile", "data"
+                )
                 self.vectorstore = Chroma(
-                    persist_directory=self.persist_directory,
+                    persist_directory=persist_dir,
                     embedding_function=self.embeddings,
                     collection_name="user_profile"
                 )
             except Exception as e:
                 print(f"Failed to initialize Chroma for profile: {e}")
+
+    @property
+    def name(self) -> str:
+        return "Personal Profile"
+
+    @property
+    def description(self) -> str:
+        return "Stores and retrieves personal information about the user"
+
+    @property
+    def triggers(self) -> List[str]:
+        return ["remember this", "save this about me", "my preference", "personal info", "about me"]
 
     @property
     def required_config(self) -> List[str]:
@@ -84,30 +93,20 @@ class ProfileSkill(Skill):
         def set_personal_info(key: str, value: str, category: str = "general") -> str:
             """
             Save personal information about the user.
-            Use this when the user says "set my location to X" or "my name is Y".
+            
             Args:
-                key: The attribute name (e.g., "location", "name", "favorite_color").
-                value: The value of the attribute (e.g., "Oatlands NSW 2117", "Jacob").
-                category: Optional category (e.g., "location", "identity", "preference").
+                key: The attribute name (e.g., "location", "name", "favorite_color")
+                value: The value of the attribute
+                category: Optional category (e.g., "location", "identity", "preference")
             """
             if not self.vectorstore:
-                return "Profile system not initialized. Check OPENAI_API_KEY."
+                return "Profile system not initialized. Check API key configuration."
 
-            # Check if key already exists (simple exact match on metadata)
-            # This is a bit tricky with vector stores. We might want to "update" logic.
-            # But for now, we just add a new document. The retrieval will likely find the most recent or relevant one.
-            # To be smarter, we could search for existing key and delete/update it.
-            
-            # Implementation for "upsert" logic based on key:
             try:
                 collection = self.vectorstore._collection
-                # Find by key in metadata
                 existing = collection.get(where={"key": key})
                 if existing and existing['ids']:
-                    # Delete existing
                     collection.delete(ids=existing['ids'])
-                    # print(f"Updated existing profile entry for '{key}'")
-
             except Exception as e:
                 print(f"Error checking existing profile info: {e}")
 
@@ -117,41 +116,32 @@ class ProfileSkill(Skill):
                 "timestamp": datetime.datetime.now().isoformat(),
                 "type": "user_profile_attribute"
             }
-            
-            # Content is structured for semantic search
-            # Crucially, we must include the value in a way that retrieval for "wife's name" works.
-            # If key is "wife" and value is "Xueqing Pan", content "wife: Xueqing Pan" works.
-            # But if key is obscure, it might fail.
+
             content = f"User's {key} is {value}. (Category: {category})"
-            
             self.vectorstore.add_documents([Document(page_content=content, metadata=meta)])
             return f"✅ Personal info updated: {key} = {value}"
 
         @tool
         def get_personal_info(query: str) -> str:
             """
-            Retrieve personal information about the user based on a query.
-            Use this when the user asks "what is my location?" or "do you know my name?".
+            Retrieve personal information based on a query.
+            
             Args:
-                query: The question or keyword to search for (e.g., "location", "my address").
+                query: The question or keyword to search for
             """
             if not self.vectorstore:
                 return "Profile system not initialized."
 
             try:
-                # Similarity search
-                # Increase k to catch more context if multiple attributes match "wife"
                 docs = self.vectorstore.similarity_search(query, k=5)
                 if not docs:
                     return f"I don't have any information about '{query}' in your profile."
-                
+
                 results = []
                 for doc in docs:
-                    # Return the full sentence we stored
                     results.append(doc.page_content)
-                
-                return "Here is what I found in your profile:\n" + "\n".join(results)
 
+                return "Here is what I found in your profile:\n" + "\n".join(results)
             except Exception as e:
                 return f"Error retrieving personal info: {e}"
 

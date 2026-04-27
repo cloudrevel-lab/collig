@@ -1,13 +1,21 @@
-from typing import Dict, Any, List, Optional
+"""
+Weather Reporter Skill - Portable implementation following agentskills.io spec.
+
+Provides current weather information and forecasts using Open-Meteo API.
+"""
+from typing import List, Optional, Dict, Any
 import requests
 import re
 from datetime import datetime, timedelta
 from langchain_core.tools import tool, BaseTool
-from .base import Skill
+from ..base import Skill
+
 
 class WeatherSkill(Skill):
-    def __init__(self):
-        super().__init__()
+    """Provides current weather information and forecasts using Open-Meteo API."""
+
+    def __init__(self, skill_root=None):
+        super().__init__(skill_root)
 
     @property
     def name(self) -> str:
@@ -15,7 +23,14 @@ class WeatherSkill(Skill):
 
     @property
     def description(self) -> str:
-        return "Provides current weather information using Open-Meteo."
+        return "Provides current weather information and forecasts using Open-Meteo API"
+
+    @property
+    def triggers(self) -> List[str]:
+        return [
+            "weather", "forecast", "temperature", "is it raining",
+            "what's the weather", "what is the weather"
+        ]
 
     def _parse_location_query(self, query: str) -> tuple[str, Optional[str], Optional[str]]:
         """
@@ -93,6 +108,7 @@ class WeatherSkill(Skill):
             Get the current weather or forecast for a specific city.
             Supports queries like "Sydney", "Oatlands NSW 2117", "Sydney tomorrow",
             "London next week", "Paris on Monday".
+            
             Args:
                 query: The city and optional date (e.g., "London", "Sydney tomorrow", "Oatlands NSW 2117 next Monday").
             """
