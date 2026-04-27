@@ -1572,6 +1572,7 @@ def print_banner():
 def main():
     parser = argparse.ArgumentParser(description="Collig CLI")
     parser.add_argument("--session", type=str, help="Session ID to resume")
+    parser.add_argument("--prompt", type=str, help="Single prompt to execute (non-interactive mode)")
     args = parser.parse_args()
 
     print_banner()
@@ -1660,6 +1661,23 @@ def main():
     else:
         session_id = agent.session_manager.create_session()
         console.print(f"[bold cyan]New session started: {session_id}[/bold cyan]")
+
+    # Handle non-interactive mode (--prompt)
+    if args.prompt:
+        console.print(f"[bold cyan]Session: {session_id}[/bold cyan]\n")
+        console.print(f"[bold green]You:[/bold green] {args.prompt}\n")
+        try:
+            # Process the prompt using agent's process_message method
+            result = agent.process_message(args.prompt, session_id)
+            # result is a dict with "response" key
+            response = result.get("response", "No response") if isinstance(result, dict) else result
+            console.print(f"[bold blue]Collig:[/bold blue] {response}")
+            # Print token stats if available
+            if isinstance(result, dict) and "total_tokens" in result:
+                console.print(f"\n[dim]Tokens: {result.get('total_tokens', 'N/A')} total[/dim]")
+        except Exception as e:
+            console.print(f"[bold red]Error:[/bold red] {e}")
+        return
 
     console.print("[bold blue]Collig Co-worker AI - CLI Mode[/bold blue]")
     console.print("Type [bold yellow]'exit'[/bold yellow] or [bold yellow]'quit'[/bold yellow] to end the session.")

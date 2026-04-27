@@ -9,7 +9,7 @@ help:
 	@echo "  make core          - Start only the core service"
 	@echo "  make frontend      - Start only the frontend service"
 	@echo "  make pa            - Start the interactive CLI co-worker"
-	@echo "                       Usage: make pa [session=SESSION_ID]"
+	@echo "                       Usage: make pa [session=SESSION_ID] [prompt=\"PROMPT\"]"
 	@echo "  make list-sessions - List available chat sessions"
 	@echo "  make lint          - Run isort, black, and flake8 on modified files (max line length 120)"
 	@echo "  make console-start - Start the admin console on port 5005"
@@ -27,7 +27,7 @@ frontend:
 	cd frontend && npm run dev
 
 pa:
-	cd core && uv run python cli.py $(if $(session),--session $(session),)
+	cd core && uv run python cli.py $(if $(session),--session $(session),) $(if $(prompt),--prompt "$(prompt)",)
 
 list-sessions:
 	cd core && uv run python list_sessions.py

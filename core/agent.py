@@ -63,7 +63,7 @@ _TOOL_KEYWORDS = {
     'git': ['git', 'commit', 'push', 'pull', 'branch', 'status', 'diff', 'stash'],
     'memory': ['note', 'remember', 'save note', 'my notes', 'search notes'],
     'bookmark': ['bookmark', 'save link', 'saved links', 'favorites'],
-    'profile': ['my name', 'my info', 'personal info', 'set my name', 'about me'],
+    'profile': ['my name', 'my info', 'personal info', 'set my name', 'about me', 'remember this', 'save this about', 'my location', 'my preference'],
     'system': ['system status', 'disk space', 'memory usage', 'install', 'package'],
     'calendar': ['lunar', 'chinese calendar', 'chinese date'],
     'date': ['days between', 'date calculator', 'what date', 'add days', 'subtract days'],

@@ -36,14 +36,19 @@ class ProfileSkill(Skill):
         This is called after the skill is registered and config is available.
         """
         super().configure(config)
+        # Reset initialized flag to allow re-initialization with new config
+        self._initialized = False
         # Re-initialize the store with the new config
         self._initialize_store()
 
     def _initialize_store(self):
         """Initialize the vector store if configuration is available."""
-        # Avoid re-initializing if already done
+        # Avoid re-initializing if already successfully done
         if self._initialized and self.vectorstore is not None:
             return
+
+        # Reset flag - will be set to True only after successful initialization
+        self._initialized = False
 
         llm_provider = self.config.get("LLM_PROVIDER", "openai")
 
@@ -65,7 +70,7 @@ class ProfileSkill(Skill):
             api_key = self.config.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
 
         if not api_key:
-            self._initialized = True
+            # Don't set _initialized = True here - allow retry if config is updated later
             return
 
         if Chroma:
@@ -86,9 +91,10 @@ class ProfileSkill(Skill):
                 self._initialized = True
             except Exception as e:
                 print(f"Failed to initialize Chroma for profile: {e}")
-                self._initialized = True
+                # Don't set _initialized = True on error - allow retry
         else:
-            self._initialized = True
+            # Chroma not available - don't set _initialized, allow retry
+            pass
 
     @property
     def name(self) -> str:
