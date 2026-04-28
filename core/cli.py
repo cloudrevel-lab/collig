@@ -75,6 +75,10 @@ class SkillCommandCompleter(Completer):
             ("console stop", "Stop the admin console"),
             ("console restart", "Restart the admin console"),
             ("console open", "Open the console in your browser"),
+            ("jira", "Jira management - list sprint tasks, issues, or get issue details"),
+            ("jira sprint", "List your sprint board tasks"),
+            ("jira issues", "List all your open issues"),
+            ("jira get", "Get details for a specific issue (e.g., /jira get AIE-123)"),
             ("exit", "Exit the application"),
             ("quit", "Exit the application"),
             ("clear", "Clear the screen")
@@ -822,6 +826,23 @@ def get_config_schema(agent=None):
         "description": "DashScope endpoint region (china: https://dashscope.aliyuncs.com, singapore: https://dashscope-intl.aliyuncs.com)"
     })
 
+    # Jira Skill Configuration
+    schema.append({
+        "key": "JIRA_EMAIL",
+        "type": "string",
+        "default": "",
+        "category": "JIRA",
+        "description": "Your NSW Education email for Jira API authentication"
+    })
+
+    schema.append({
+        "key": "JIRA_API_TOKEN",
+        "type": "secret",
+        "default": "",
+        "category": "JIRA",
+        "description": "Your Atlassian API token (get from https://id.atlassian.com/manage/api-tokens)"
+    })
+
     # Add any additional configs from agent skills
     if agent:
         seen_keys = {item["key"] for item in schema}
@@ -922,7 +943,13 @@ def interactive_config_ui(agent=None):
 
         # Build the list with categories
         current_index = 0
+        first_category = True
         for cat, items in categories.items():
+            # Add separator between categories (except before first)
+            if not first_category:
+                result.append(("dim", "  " + "─" * 50 + "\n"))
+            first_category = False
+            
             result.append(("bold cyan", f"  {cat}\n"))
             for item in items:
                 prefix = "> " if current_index == settings_selected_index else "  "
@@ -1289,6 +1316,73 @@ def handle_config_command(command_parts, agent=None):
         console.print("[dim]Note: You may need to restart the session for changes to take effect in some skills.[/dim]")
     else:
         console.print(f"Unknown config action: {action}")
+
+
+def handle_jira_command(command_parts, agent=None):
+    """
+    Handles Jira commands:
+    - /jira (shows menu)
+    - /jira sprint - List sprint board tasks
+    - /jira issues - List all open issues
+    - /jira get AIE-123 - Get issue details
+    """
+    config = load_config()
+    
+    # Check if Jira is configured
+    jira_email = config.get("JIRA_EMAIL")
+    jira_token = config.get("JIRA_API_TOKEN")
+    
+    if not jira_email or not jira_token:
+        console.print("[bold red]Jira not configured![/bold red]")
+        console.print("Run [cyan]/config[/cyan] and set:")
+        console.print("  - JIRA_EMAIL: Your NSW Education email")
+        console.print("  - JIRA_API_TOKEN: Your Atlassian API token")
+        console.print("\nGet your API token at: https://id.atlassian.com/manage/api-tokens")
+        return
+    
+    if len(command_parts) < 2:
+        # Show interactive menu
+        console.print("[bold]Jira Commands:[/bold]")
+        console.print("  /jira sprint          - List your sprint board tasks")
+        console.print("  /jira issues          - List all your open issues")
+        console.print("  /jira get AIE-123     - Get details for a specific issue")
+        return
+    
+    action = command_parts[1]
+    
+    # Import and use the Jira skill directly
+    try:
+        from skills.jira import JiraSkill
+        skill = JiraSkill()
+        skill.configure(config)
+        
+        if action == "sprint":
+            console.print("[dim]Fetching your sprint tasks...[/dim]")
+            tools = skill.get_tools()
+            result = tools[0].func()  # list_sprint_tasks
+            console.print(result)
+            
+        elif action == "issues":
+            console.print("[dim]Fetching your open issues...[/dim]")
+            tools = skill.get_tools()
+            result = tools[1].func()  # list_my_issues
+            console.print(result)
+            
+        elif action == "get":
+            if len(command_parts) < 3:
+                console.print("[red]Usage: /jira get ISSUE-KEY (e.g., /jira get AIE-123)[/red]")
+                return
+            issue_key = command_parts[2]
+            console.print(f"[dim]Fetching {issue_key}...[/dim]")
+            tools = skill.get_tools()
+            result = tools[2].func(issue_key)  # get_issue
+            console.print(result)
+        else:
+            console.print(f"[red]Unknown jira command: {action}[/red]")
+            console.print("Use [cyan]/jira[/cyan] for available commands.")
+            
+    except Exception as e:
+        console.print(f"[bold red]Jira command failed:[/bold red] {e}")
 
 
 # ─── Admin Console Management ──────────────────────────────────────────────────
@@ -2251,6 +2345,10 @@ def main():
                 new_config = load_config()
                 for skill in agent.skill_manager.skills:
                     skill.configure(new_config)
+                continue
+
+            if user_input.startswith("jira"):
+                handle_jira_command(user_input.split(), agent)
                 continue
 
             if user_input.startswith("console"):

@@ -26,6 +26,7 @@ from skills.menu import MenuSkill
 from skills.survey import SurveySkill
 from skills.diary import DiarySkill
 from skills.web_search import WebSearchSkill
+from skills.jira import JiraSkill
 from core.session import SessionManager
 from core.paths import paths
 
@@ -74,6 +75,7 @@ _TOOL_KEYWORDS = {
     'thinking': ['hide thinking', 'show thinking', 'toggle thinking'],
     'diary': ['diary', 'create a diary', 'diary entry', 'my diary'],
     'web_search': ['search', 'look up', 'find information', 'google', 'search the web', 'web search'],
+    'jira': ['jira', 'sprint', 'my plate', 'on my plate', 'ticket', 'tickets', 'issue', 'issues', 'task', 'tasks', 'story', 'stories', 'backlog', 'scrum', 'agile', 'board'],
 }
 
 
@@ -538,6 +540,7 @@ class Agent:
         self.skill_manager.register_skill(SurveySkill())
         self.skill_manager.register_skill(DiarySkill())
         self.skill_manager.register_skill(WebSearchSkill())
+        self.skill_manager.register_skill(JiraSkill())
         # self.skill_manager.register_skill(ChatSkill()) # Fallback / General Skill
 
     def _init_langchain_agent(self):
