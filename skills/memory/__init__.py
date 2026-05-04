@@ -75,12 +75,12 @@ class MemorySkill(Skill):
                     self.embeddings = OpenAIEmbeddings(api_key=api_key, model=model_name)
 
                 persist_dir = self.persist_directory or os.path.join(
-                    os.path.expanduser("~"), ".collig", "skills", "memory_notes", "data"
+                    os.path.expanduser("~"), ".collig", "data", "memory_notes"
                 )
                 self.vectorstore = Chroma(
                     persist_directory=persist_dir,
                     embedding_function=self.embeddings,
-                    collection_name="memory_notes"
+                    collection_name="user_memory"
                 )
                 self._initialized = True
             except Exception as e:

@@ -75,12 +75,12 @@ class BookmarkSkill(Skill):
                     self.embeddings = OpenAIEmbeddings(api_key=api_key, model=model_name)
 
                 persist_dir = self.persist_directory or os.path.join(
-                    os.path.expanduser("~"), ".collig", "skills", "bookmarks", "data"
+                    os.path.expanduser("~"), ".collig", "data", "bookmarks"
                 )
                 self.vectorstore = Chroma(
                     persist_directory=persist_dir,
                     embedding_function=self.embeddings,
-                    collection_name="bookmarks"
+                    collection_name="user_bookmarks"
                 )
                 self._initialized = True
             except Exception as e:

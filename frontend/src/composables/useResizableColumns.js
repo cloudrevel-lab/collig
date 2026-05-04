@@ -5,7 +5,7 @@ export function useResizableColumns(tableId) {
   const colWidths = ref({})
 
   // Load saved widths from localStorage
-  function loadWidths() {
+  function loadWidths(defaultWidths = {}) {
     try {
       const saved = localStorage.getItem(`collig-col-widths-${tableId}`)
       if (saved) colWidths.value = JSON.parse(saved)
@@ -33,6 +33,8 @@ export function useResizableColumns(tableId) {
       headers[index].style.width = width + 'px'
       headers[index].style.minWidth = width + 'px'
       headers[index].style.maxWidth = width + 'px'
+      // Also set via setAttribute for better browser support
+      headers[index].setAttribute('style', `width: ${width}px; min-width: ${width}px; max-width: ${width}px;`)
     }
 
     // Apply to body cells
@@ -43,14 +45,19 @@ export function useResizableColumns(tableId) {
         cells[index].style.width = width + 'px'
         cells[index].style.minWidth = width + 'px'
         cells[index].style.maxWidth = width + 'px'
+        cells[index].setAttribute('style', `width: ${width}px; min-width: ${width}px; max-width: ${width}px;`)
       }
     })
   }
 
   // Set up drag handlers on header resizers
-  function initResizers() {
+  function initResizers(defaultWidths = {}) {
     const table = document.querySelector(`[data-table-id="${tableId}"]`)
     if (!table) return
+
+    // First, clear any inline styles from existing cells
+    const allCells = table.querySelectorAll('td')
+    allCells.forEach(cell => cell.removeAttribute('style'))
 
     const headers = table.querySelectorAll('thead th')
     headers.forEach((th, index) => {
@@ -87,6 +94,13 @@ export function useResizableColumns(tableId) {
         }
 
         resizer.addEventListener('mousedown', onMouseDown)
+      }
+    })
+
+    // Apply default widths if none saved
+    Object.entries(defaultWidths).forEach(([idx, w]) => {
+      if (colWidths.value[idx] === undefined) {
+        applyWidth(parseInt(idx), w)
       }
     })
   }

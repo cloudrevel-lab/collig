@@ -36,7 +36,15 @@
       data-table-id="bookmarks"
     >
       <template v-slot:item.url="{ item }">
-        <a :href="item.url" target="_blank" class="url-link text-primary text-decoration-none" :title="item.url">{{ item.url }}</a>
+        <a
+          :href="item.url"
+          target="_blank"
+          class="url-link text-primary text-decoration-none"
+          :title="fullTruncatedText(item.url, 100)"
+          @click.stop="showFullUrl(item.url)"
+        >
+          {{ fullTruncatedText(item.url, 100) }}
+        </a>
       </template>
 
       <template v-slot:item.description="{ item }">
@@ -109,6 +117,36 @@
         </v-card-actions>
       </v-card>
     </v-dialog>
+
+    <!-- Full URL Dialog -->
+    <v-dialog v-model="urlDialog" max-width="500">
+      <v-card rounded="xl">
+        <v-card-title>Full URL</v-card-title>
+        <v-divider />
+        <v-card-text class="pa-4">
+          <v-text-field
+            v-model="fullUrlToDisplay"
+            readonly
+            variant="outlined"
+            class="mb-2"
+            hide-details
+          />
+          <div style="display: flex; gap: 8px;">
+            <v-btn color="primary" prepend-icon="mdi-open-in-new" @click="openUrlInNewTab">
+              Open in new tab
+            </v-btn>
+            <v-btn color="secondary" prepend-icon="mdi-content-copy" @click="copyUrlToClipboard">
+              Copy to clipboard
+            </v-btn>
+          </div>
+        </v-card-text>
+        <v-divider />
+        <v-card-actions class="pa-3">
+          <v-spacer />
+          <v-btn text @click="urlDialog = false">Close</v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
   </div>
 </template>
 
@@ -136,6 +174,15 @@ const headers = [
   { title: 'Added', key: 'timestamp' },
   { title: 'Actions', key: 'actions', sortable: false },
 ]
+
+// Initial column widths (in pixels) - these get saved to localStorage
+const initialColumnWidths = {
+  0: 350,  // URL - constrained width
+  1: 220,  // Description
+  2: 150,  // Tags
+  3: 120,  // Timestamp
+  4: 90,   // Actions
+}
 
 const filteredBookmarks = computed(() => {
   if (!search.value) return bookmarks.value
@@ -227,13 +274,35 @@ function formatTimestamp(ts) {
   }
 }
 
-// Initialize resizable columns
+function fullTruncatedText(text, maxLength) {
+  if (!text || text.length <= maxLength) return text
+  return text.substring(0, maxLength) + '...'
+}
+
+// Show full URL in a dialog
+const urlDialog = ref(false)
+const fullUrlToDisplay = ref('')
+
+function showFullUrl(url) {
+  fullUrlToDisplay.value = url
+  urlDialog.value = true
+}
+
+function openUrlInNewTab() {
+  window.open(fullUrlToDisplay.value, '_blank')
+}
+
+function copyUrlToClipboard() {
+  navigator.clipboard.writeText(fullUrlToDisplay.value)
+}
+
+// Initialize resizable columns with default widths
 const { initResizers } = useResizableColumns('bookmarks')
 onMounted(async () => {
   await loadBookmarks()
   await nextTick()
   setTimeout(() => {
-    initResizers()
+    initResizers(initialColumnWidths)
   }, 300)
 })
 </script>
@@ -248,10 +317,17 @@ onMounted(async () => {
 </style>
 
 <style>
-/* Global styles for resizable table columns — must be unscoped to affect Vuetify internals */
-.resizable-table th {
-  position: relative;
-  user-select: none;
+/* Global styles for resizable table columns */
+.resizable-table {
+  table-layout: fixed !important;
+}
+
+.resizable-table th,
+.resizable-table td {
+  max-width: none !important;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .col-resizer {
@@ -269,10 +345,5 @@ onMounted(async () => {
 .col-resizer:hover,
 .col-resizer:active {
   background: rgba(var(--v-theme-primary), 0.3);
-}
-
-.resizable-table td {
-  overflow: hidden;
-  white-space: nowrap;
 }
 </style>
