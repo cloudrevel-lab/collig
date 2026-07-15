@@ -74,6 +74,22 @@ class BookmarkSkill(Skill):
                 else:
                     self.embeddings = OpenAIEmbeddings(api_key=api_key, model=model_name)
 
+                # Test embeddings with a simple query
+                try:
+                    self.embeddings.embed_query("test")
+                except Exception as e:
+                    # If embeddings fail, try falling back to OpenAI
+                    if llm_provider == "dashscope":
+                        openai_key = self.config.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+                        if openai_key:
+                            print(f"DashScope embeddings unavailable ({e}), falling back to OpenAI for embeddings")
+                            self.embeddings = OpenAIEmbeddings(api_key=openai_key, model="text-embedding-ada-002")
+                            base_url = None
+                        else:
+                            raise
+                    else:
+                        raise
+
                 persist_dir = self.persist_directory or os.path.join(
                     os.path.expanduser("~"), ".collig", "data", "bookmarks"
                 )

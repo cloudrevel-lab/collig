@@ -274,12 +274,19 @@ def update_bookmark(bookmark_id: str, bm: BookmarkUpdate):
                 break
         new_desc = bm.description if bm.description is not None else old_desc
 
-        # Delete old, create new
-        skill.vectorstore.delete(ids=[bookmark_id])
-        from langchain_core.documents import Document
-        meta = {"url": new_url, "timestamp": old_meta.get("timestamp", datetime.datetime.now().isoformat()), "tags": new_tags, "type": "user_bookmark"}
+        # Update the document in place using ChromaDB's update method
+        new_meta = {
+            "url": new_url,
+            "timestamp": old_meta.get("timestamp", datetime.datetime.now().isoformat()),
+            "tags": new_tags,
+            "type": "user_bookmark"
+        }
         search_content = f"URL: {new_url}\nDescription: {new_desc}\nTags: {new_tags}"
-        skill.vectorstore.add_documents([Document(page_content=search_content, metadata=meta)])
+        skill.vectorstore._collection.update(
+            ids=[bookmark_id],
+            documents=[search_content],
+            metadatas=[new_meta]
+        )
         return {"message": "Bookmark updated"}
     except HTTPException:
         raise
@@ -335,14 +342,19 @@ def update_note(note_id: str, note: NoteUpdate):
         if not existing.get("ids"):
             raise HTTPException(status_code=404, detail="Note not found")
 
-        old_content = existing["documents"][0]
         old_meta = existing["metadatas"][0]
-        new_content = note.content if note.content is not None else old_content
-
-        skill.vectorstore.delete(ids=[note_id])
-        from langchain_core.documents import Document
-        meta = {"timestamp": old_meta.get("timestamp", datetime.datetime.now().isoformat()), "type": "user_note"}
-        skill.vectorstore.add_documents([Document(page_content=new_content, metadata=meta)])
+        new_content = note.content if note.content is not None else existing["documents"][0]
+        
+        # Update the document in place using ChromaDB's update method
+        new_meta = {
+            "timestamp": old_meta.get("timestamp", datetime.datetime.now().isoformat()),
+            "type": "user_note"
+        }
+        skill.vectorstore._collection.update(
+            ids=[note_id],
+            documents=[new_content],
+            metadatas=[new_meta]
+        )
         return {"message": "Note updated"}
     except HTTPException:
         raise
@@ -398,14 +410,19 @@ def update_diary_entry(entry_id: str, entry: DiaryEntryUpdate):
         if not existing.get("ids"):
             raise HTTPException(status_code=404, detail="Diary entry not found")
 
-        old_content = existing["documents"][0]
         old_meta = existing["metadatas"][0]
-        new_content = entry.content if entry.content is not None else old_content
-
-        skill.vectorstore.delete(ids=[entry_id])
-        from langchain_core.documents import Document
-        meta = {"timestamp": old_meta.get("timestamp", datetime.datetime.now().isoformat()), "type": "diary_entry"}
-        skill.vectorstore.add_documents([Document(page_content=new_content, metadata=meta)])
+        new_content = entry.content if entry.content is not None else existing["documents"][0]
+        
+        # Update the document in place using ChromaDB's update method
+        new_meta = {
+            "timestamp": old_meta.get("timestamp", datetime.datetime.now().isoformat()),
+            "type": "diary_entry"
+        }
+        skill.vectorstore._collection.update(
+            ids=[entry_id],
+            documents=[new_content],
+            metadatas=[new_meta]
+        )
         return {"message": "Diary entry updated"}
     except HTTPException:
         raise
