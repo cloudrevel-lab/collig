@@ -437,6 +437,10 @@ class Agent:
             self.llm_model = "deepseek-chat" # Default for deepseek
         elif self.llm_provider == "dashscope":
             self.llm_model = "qwen-plus" # Default for dashscope
+        elif self.llm_provider == "custom":
+            # No hard-coded default model for a custom endpoint; keep whatever
+            # LLM_MODEL is configured (fall back to a common placeholder).
+            self.llm_model = self.llm_model or "gpt-4o"
 
         console.print(f"Switching provider to {self.llm_provider} (Model: {self.llm_model})")
         self._init_langchain_agent()
@@ -514,7 +518,29 @@ class Agent:
         output.append("\n[bold cyan]llama (alias for ollama)[/bold cyan]:")
         output.append("  (Use 'ollama' provider instead)")
 
+        # Custom OpenAI-compatible provider
+        output.append("\n[bold cyan]custom (OpenAI-compatible endpoint)[/bold cyan]:")
+        custom_url = self._get_config_value("CUSTOM_BASE_URL")
+        if custom_url:
+            output.append(f"  Endpoint: {custom_url}")
+        else:
+            output.append("  Endpoint: (not set - run 'config set CUSTOM_BASE_URL <url>')")
+        output.append("  Set the model with LLM_MODEL (e.g. 'provider custom <model-name>')")
+        output.append("  API key: CUSTOM_API_KEY (optional for local servers)")
+
         return "\n".join(output)
+
+    def _get_config_value(self, key):
+        """Read a value from env first, then config.json. Returns None if unset."""
+        import json as _json
+        value = os.getenv(key)
+        if value:
+            return value
+        try:
+            with open(paths.global_config_file, "r") as f:
+                return _json.load(f).get(key)
+        except Exception:
+            return None
 
     def _register_initial_skills(self):
         """Registers the built-in skills."""
@@ -643,6 +669,38 @@ class Agent:
             )
             console.print(f"[dim]DashScope endpoint: {base_url}[/dim]")
 
+        elif self.llm_provider == "custom":
+            # Generic OpenAI-compatible provider.
+            # Reads CUSTOM_BASE_URL and CUSTOM_API_KEY from env or config.json,
+            # and uses LLM_MODEL as the model name. Works with any endpoint
+            # that speaks the OpenAI chat-completions protocol
+            # (vLLM, LM Studio, OpenRouter, Together, Groq, local gateways, ...).
+            base_url = get_api_key("CUSTOM_BASE_URL")
+            if not base_url:
+                console.print(
+                    "Warning: CUSTOM_BASE_URL not found. "
+                    "Please set it using 'config set CUSTOM_BASE_URL <url>'."
+                )
+                return
+
+            api_key = get_api_key("CUSTOM_API_KEY")
+            if not api_key:
+                # Some local servers (e.g. Ollama's OpenAI shim, vLLM) accept
+                # any non-empty key. Default to a placeholder so requests work.
+                api_key = "not-needed"
+                console.print(
+                    "[dim]CUSTOM_API_KEY not set; using placeholder key "
+                    "(fine for local servers that don't require auth).[/dim]"
+                )
+
+            self.llm = ChatOpenAI(
+                model=self.llm_model,
+                temperature=0,
+                base_url=base_url,
+                api_key=api_key,
+            )
+            console.print(f"[dim]Custom endpoint: {base_url} (Model: {self.llm_model})[/dim]")
+
         else:
             console.print(f"Unknown provider: {self.llm_provider}. Falling back to OpenAI.")
             self.llm_provider = "openai"
@@ -709,14 +767,27 @@ After searching, provide a natural, helpful answer that:
         self.agent_executor = create_react_agent(self.llm, self.all_tools, prompt=system_prompt)
 
     def _load_external_skills(self):
-        """Loads external skills from SKILL.md files."""
-        # Assume skills are in backend/skills or backend/skills/imported
-        # The loader looks in "skills" relative to CWD, which is usually backend/
-        # But if running from root, might need adjustment.
-        # Assuming we run from backend/ as per Makefile
-        loader = SkillLoader(skills_dir="skills")
-        external_skills = loader.load_skills()
-        for skill in external_skills:
+        """
+        Loads user-installed external skills from skills/imported/.
+
+        The built-in skills are registered explicitly in
+        _register_initial_skills (as imported classes), so this step only
+        needs to pick up drop-in SKILL.md skills. Previously this scanned
+        the entire skills/ tree, which re-executed and re-registered every
+        built-in module on top of the ones already registered -- wasted work
+        at startup -- while never actually loading the imported/ directory the
+        README documents. Scanning only imported/ fixes both.
+        """
+        from pathlib import Path
+
+        # Resolve relative to this file so it works regardless of CWD
+        # (Makefile runs from core/, but the server/ADK may not).
+        imported_dir = Path(__file__).resolve().parent.parent / "skills" / "imported"
+        if not imported_dir.exists():
+            return
+
+        loader = SkillLoader(skills_dir=imported_dir)
+        for skill in loader.load_skills():
             self.skill_manager.register_skill(skill)
 
 

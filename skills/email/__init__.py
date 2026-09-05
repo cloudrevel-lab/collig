@@ -15,14 +15,28 @@ import datetime
 import json
 import urllib.parse
 
-try:
-    from langchain_openai import OpenAIEmbeddings
-    from langchain_chroma import Chroma
-    from langchain_core.documents import Document
-except ImportError:
-    Chroma = None
-    OpenAIEmbeddings = None
-    Document = None
+# Heavy vector-store dependencies (langchain_chroma pulls in chromadb, ~0.6s)
+# are imported lazily via ``_load_vectorstore_deps`` so importing this module
+# at startup stays cheap. They are only needed once email semantic search is actually
+# used, which happens well after the CLI is interactive.
+Chroma = None
+OpenAIEmbeddings = None
+Document = None
+
+
+def _load_vectorstore_deps():
+    """Import Chroma/OpenAIEmbeddings/Document on first use. Returns True on success."""
+    global Chroma, OpenAIEmbeddings, Document
+    if Chroma is not None:
+        return True
+    try:
+        from langchain_openai import OpenAIEmbeddings as _OE
+        from langchain_chroma import Chroma as _C
+        from langchain_core.documents import Document as _D
+        OpenAIEmbeddings, Chroma, Document = _OE, _C, _D
+        return True
+    except ImportError:
+        return False
 
 
 class EmailSkill(Skill):
@@ -131,7 +145,7 @@ class EmailSkill(Skill):
         else:
             api_key = self.config.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
 
-        if api_key and Chroma and Document:
+        if api_key and _load_vectorstore_deps():
             try:
                 if base_url:
                     self.embeddings = OpenAIEmbeddings(api_key=api_key, base_url=base_url, model=model_name)

@@ -85,10 +85,17 @@ class SkillManager:
     def register_skill(self, skill: Skill):
         """
         Register a skill instance.
-        
+
+        Skips registration if a skill with the same name is already
+        registered, so re-scanning skill directories cannot create
+        duplicate skills (and duplicate tools).
+
         Args:
             skill: Skill instance to register
         """
+        for existing in self.skills:
+            if existing.name == skill.name:
+                return
         import sys
         sys.stdout.write(f"\r\033[KRegistering skill: {skill.name}")
         sys.stdout.flush()

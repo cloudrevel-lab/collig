@@ -7,14 +7,28 @@ import os
 from langchain_core.tools import tool, BaseTool
 from skills.base import Skill
 
-try:
-    from langchain_openai import OpenAIEmbeddings
-    from langchain_chroma import Chroma
-    from langchain_core.documents import Document
-except ImportError:
-    Chroma = None
-    OpenAIEmbeddings = None
-    Document = None
+# Heavy vector-store dependencies (langchain_chroma pulls in chromadb, ~0.6s)
+# are imported lazily via ``_load_vectorstore_deps`` so importing this module
+# at startup stays cheap. They are only needed once a diary entry is stored/searched is actually
+# used, which happens well after the CLI is interactive.
+Chroma = None
+OpenAIEmbeddings = None
+Document = None
+
+
+def _load_vectorstore_deps():
+    """Import Chroma/OpenAIEmbeddings/Document on first use. Returns True on success."""
+    global Chroma, OpenAIEmbeddings, Document
+    if Chroma is not None:
+        return True
+    try:
+        from langchain_openai import OpenAIEmbeddings as _OE
+        from langchain_chroma import Chroma as _C
+        from langchain_core.documents import Document as _D
+        OpenAIEmbeddings, Chroma, Document = _OE, _C, _D
+        return True
+    except ImportError:
+        return False
 
 
 class DiarySkill(Skill):
@@ -38,7 +52,7 @@ class DiarySkill(Skill):
         self._initialized = False
         api_key = self.config.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
 
-        if not api_key or not Chroma:
+        if not api_key or not _load_vectorstore_deps():
             return
 
         try:

@@ -51,7 +51,9 @@ class SkillCommandCompleter(Completer):
             ("backup", "Backup user data to a zip file"),
             ("restore", "Restore user data from a zip file (overwrite)"),
             ("load", "Load and merge data from a backup zip file (preserves existing)"),
-            ("provider", "Switch LLM provider (openai/ollama/llama/deepseek)"),
+            ("provider", "Show current provider, or switch (openai/ollama/llama/deepseek/dashscope/custom)"),
+            ("provider list", "List all providers and their default models"),
+            ("provider models", "Fetch live models from the current endpoint and pick one"),
             ("news", "Open interactive news browser (if news was searched)"),
             ("news cached", "Browse saved news searches"),
             ("news history", "Browse saved news searches"),
@@ -79,6 +81,9 @@ class SkillCommandCompleter(Completer):
             ("jira sprint", "List your sprint board tasks"),
             ("jira issues", "List all your open issues"),
             ("jira get", "Get details for a specific issue (e.g., /jira get AIE-123)"),
+            ("jira add-board", "Save a Jira board by id (e.g., /jira add-board 1726)"),
+            ("jira list-board", "List saved boards, or a board's issues (e.g., /jira list-board 1726)"),
+            ("jira remove-board", "Remove a saved board (e.g., /jira remove-board 1726)"),
             ("exit", "Exit the application"),
             ("quit", "Exit the application"),
             ("clear", "Clear the screen")
@@ -770,9 +775,9 @@ def get_config_schema(agent=None):
         "key": "LLM_PROVIDER",
         "type": "choice",
         "default": "openai",
-        "options": ["openai", "ollama", "llama", "deepseek", "dashscope"],
+        "options": ["openai", "ollama", "llama", "deepseek", "dashscope", "custom"],
         "category": "LLM",
-        "description": "LLM provider"
+        "description": "LLM provider ('custom' = any OpenAI-compatible endpoint)"
     })
 
     # UI Settings
@@ -815,6 +820,22 @@ def get_config_schema(agent=None):
         "default": "",
         "category": "API Keys",
         "description": "Alibaba Cloud DashScope API Key (for 阿里云/DashScope)"
+    })
+
+    schema.append({
+        "key": "CUSTOM_BASE_URL",
+        "type": "string",
+        "default": "",
+        "category": "API Keys",
+        "description": "Base URL for a custom OpenAI-compatible API (e.g. https://my-host/v1). Used when LLM_PROVIDER=custom"
+    })
+
+    schema.append({
+        "key": "CUSTOM_API_KEY",
+        "type": "secret",
+        "default": "",
+        "category": "API Keys",
+        "description": "API key for the custom OpenAI-compatible endpoint (optional for local servers)"
     })
 
     schema.append({
@@ -991,7 +1012,7 @@ def interactive_config_ui(agent=None):
     def get_footer_text():
         """Get the footer help text."""
         if current_tab == 0:
-            return to_formatted_text([("dim", "[Tab] Switch Tabs  [↑/↓] Navigate  [←/→] Toggle  [Enter] Edit  [s] Save  [q] Quit")])
+            return to_formatted_text([("dim", "[Tab] Tabs  [↑/↓] Nav  [←/→] Toggle  [Enter] Edit  [m] Fetch models  [s] Save  [q] Quit")])
         else:
             return to_formatted_text([("dim", "[Tab] Switch Tabs  [↑/↓] Navigate  [←/→/Space] Toggle  [s] Save  [q] Quit")])
 
@@ -1155,12 +1176,18 @@ def interactive_config_ui(agent=None):
 
     @kb.add("enter")
     def edit_value(event):
-        """Edit string or secret value (only in settings tab)."""
+        """Edit a string/secret value by typing (only in settings tab)."""
         if current_tab == 0:
             item = schema[settings_selected_index]
             if item["type"] in ["string", "secret"]:
                 # Exit the main app to show input dialog
                 event.app.exit(result=("edit", item))
+
+    @kb.add("m")
+    def fetch_models_key(event):
+        """Fetch available models from the current provider and pick one."""
+        if current_tab == 0:
+            event.app.exit(result=("fetch_models",))
 
     @kb.add("s")
     def save(event):
@@ -1206,17 +1233,46 @@ def interactive_config_ui(agent=None):
             item = result[1]
             current_value = config.get(item["key"], item["default"])
             is_password = item["type"] == "secret"
+            # Pre-fill with the current value (empty string if unset).
+            default_text = str(current_value) if current_value else ""
             try:
+                console.print(f"[dim]Editing {item['key']} - type the value and press Enter (Esc/Ctrl-C to cancel):[/dim]")
                 new_value = prompt(
-                    message=f"Enter {item['key']}: ",
-                    default=str(current_value),
-                    is_password=is_password
+                    message=f"{item['key']} = ",
+                    default=default_text,
+                    is_password=is_password,
                 )
                 if new_value is not None:
                     config[item["key"]] = new_value
+                    shown = "*" * 8 if is_password and new_value else (new_value or "(cleared)")
+                    console.print(f"[green]Set {item['key']} = {shown}[/green] [dim](press 's' to save)[/dim]")
                 content_control.text = get_content_text()
-            except:
-                pass
+            except (KeyboardInterrupt, EOFError):
+                console.print("[dim]Edit cancelled.[/dim]")
+            except Exception as e:
+                console.print(f"[red]Could not edit {item['key']}: {e}[/red]")
+
+        elif result[0] == "fetch_models":
+            # Persist the current provider/URL/key so fetch uses fresh values.
+            save_config(config)
+            for k in ("CUSTOM_API_KEY", "DASHSCOPE_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY"):
+                if config.get(k):
+                    os.environ[k] = config[k]
+            provider = config.get("LLM_PROVIDER", "openai")
+            console.print(f"[dim]Fetching models from provider '{provider}'...[/dim]")
+            try:
+                from core.runtime import fetch_provider_models
+                models = fetch_provider_models(provider, config)
+                current_model = config.get("LLM_MODEL", "")
+                default_idx = models.index(current_model) if current_model in models else 0
+                idx = interactive_menu("Select a model (Enter to choose, q to cancel)", models, default_idx)
+                if idx is not None and idx >= 0:
+                    config["LLM_MODEL"] = models[idx]
+                    console.print(f"[green]Selected model: {models[idx]}[/green]")
+                content_control.text = get_content_text()
+            except Exception as e:
+                console.print(f"[red]Could not fetch models: {e}[/red]")
+                console.print("[dim]Tip: select LLM_MODEL and press Enter to type a model name manually.[/dim]")
 
         elif result[0] == "saved":
             console.print("[green]Configuration saved successfully![/green]")
@@ -1318,6 +1374,181 @@ def handle_config_command(command_parts, agent=None):
         console.print(f"Unknown config action: {action}")
 
 
+def _get_jira_boards(config):
+    """Return the list of saved Jira boards from config (list of {id, name})."""
+    boards = config.get("JIRA_BOARDS")
+    if not isinstance(boards, list):
+        return []
+    normalized = []
+    for b in boards:
+        if isinstance(b, dict) and "id" in b:
+            normalized.append({"id": str(b["id"]), "name": b.get("name")})
+        elif isinstance(b, (str, int)):
+            normalized.append({"id": str(b), "name": None})
+    return normalized
+
+
+def _save_jira_boards(config, boards):
+    """Persist the boards list back to config.json."""
+    config["JIRA_BOARDS"] = boards
+    save_config(config)
+
+
+def handle_jira_add_board(command_parts, skill, config):
+    """/jira add-board <board_id> - save a board (fetching its name if possible)."""
+    if len(command_parts) < 3:
+        console.print("[red]Usage: /jira add-board BOARD_ID (e.g., /jira add-board 1726)[/red]")
+        return
+
+    board_id = str(command_parts[2]).strip()
+    if not board_id.isdigit():
+        console.print(f"[red]Board id must be numeric, got: {board_id}[/red]")
+        return
+
+    boards = _get_jira_boards(config)
+    if any(b["id"] == board_id for b in boards):
+        console.print(f"[yellow]Board {board_id} is already saved.[/yellow]")
+        return
+
+    console.print(f"[dim]Looking up board {board_id}...[/dim]")
+    name = None
+    try:
+        name = skill.get_board_name(board_id)
+    except Exception as e:
+        console.print(f"[dim]Could not fetch board name: {e}[/dim]")
+
+    boards.append({"id": board_id, "name": name})
+    _save_jira_boards(config, boards)
+
+    label = f"{board_id} ({name})" if name else board_id
+    console.print(f"[green]Added board {label}.[/green]")
+    console.print(f"Use [cyan]/jira list-board {board_id}[/cyan] to view its issues.")
+
+
+def handle_jira_remove_board(command_parts, config):
+    """/jira remove-board <board_id> - remove a saved board."""
+    if len(command_parts) < 3:
+        console.print("[red]Usage: /jira remove-board BOARD_ID[/red]")
+        return
+
+    board_id = str(command_parts[2]).strip()
+    boards = _get_jira_boards(config)
+    remaining = [b for b in boards if b["id"] != board_id]
+    if len(remaining) == len(boards):
+        console.print(f"[yellow]Board {board_id} is not in your saved boards.[/yellow]")
+        return
+
+    _save_jira_boards(config, remaining)
+    console.print(f"[green]Removed board {board_id}.[/green]")
+
+
+def handle_jira_list_board(command_parts, skill, config):
+    """
+    /jira list-board            - list saved boards
+    /jira list-board BOARD_ID   - list issues on that board, grouped by status
+                                  (done/closed shown last)
+    """
+    boards = _get_jira_boards(config)
+
+    # No specific board -> list the saved boards
+    if len(command_parts) < 3:
+        if not boards:
+            console.print("[yellow]No boards saved yet.[/yellow]")
+            console.print("Add one with [cyan]/jira add-board BOARD_ID[/cyan] (e.g., /jira add-board 1726).")
+            return
+        console.print("[bold]Saved Jira Boards:[/bold]")
+        for b in boards:
+            label = f"{b['id']}  {b['name']}" if b.get("name") else b["id"]
+            console.print(f"  • {label}")
+        console.print("\nUse [cyan]/jira list-board BOARD_ID[/cyan] to see a board's issues.")
+        return
+
+    board_id = str(command_parts[2]).strip()
+
+    # Resolve a friendly name if we know it
+    known = next((b for b in boards if b["id"] == board_id), None)
+    board_name = known.get("name") if known else None
+    if not board_name:
+        try:
+            board_name = skill.get_board_name(board_id)
+        except Exception:
+            board_name = None
+
+    header = f"Board {board_id}" + (f" - {board_name}" if board_name else "")
+    console.print(f"[dim]Fetching issues for {header}...[/dim]")
+
+    try:
+        issues = skill.get_board_issues(board_id)
+    except Exception as e:
+        console.print(f"[bold red]Failed to fetch board issues:[/bold red] {e}")
+        return
+
+    if issues is None:
+        console.print("[red]Failed to fetch issues from Jira (check credentials / board id).[/red]")
+        return
+
+    if not issues:
+        console.print(f"[yellow]No issues found on board {board_id}.[/yellow]")
+        return
+
+    def sort_key(issue):
+        fields = issue.get("fields", {})
+        status = fields.get("status") or {}
+        status_name = status.get("name", "")
+        category = (status.get("statusCategory") or {}).get("key", "")
+        priority = fields.get("priority") or {}
+        priority_name = priority.get("name") or "ZZZ"
+        return skill._status_sort_key(status_name, category) + (priority_name,)
+
+    issues_sorted = sorted(issues, key=sort_key)
+
+    status_icons = {
+        "To Do": "⬜", "In Progress": "🔄", "Done": "✅",
+        "Backlog": "📦", "Peer Review": "👀", "In Review": "👀",
+        "Closed": "✅", "Resolved": "✅",
+    }
+
+    jira_domain = skill.jira_domain
+    console.print(f"\n[bold]📋 {header}[/bold]")
+    console.print("=" * 60)
+
+    current_status = None
+    open_count = 0
+    done_count = 0
+    for issue in issues_sorted:
+        fields = issue.get("fields", {})
+        key = issue.get("key", "?")
+        summary = fields.get("summary", "")
+        status = fields.get("status") or {}
+        status_name = status.get("name", "Unknown")
+        category = (status.get("statusCategory") or {}).get("key", "")
+        priority = fields.get("priority") or {}
+        priority_name = priority.get("name") or "None"
+        assignee = fields.get("assignee") or {}
+        assignee_name = assignee.get("displayName") if assignee else "Unassigned"
+        issue_url = f"https://{jira_domain}/browse/{key}"
+
+        if category == "done" or status_name.lower() in {
+            "done", "closed", "resolved", "complete", "completed", "cancelled", "canceled"
+        }:
+            done_count += 1
+        else:
+            open_count += 1
+
+        # Print a status group header when the status changes
+        if status_name != current_status:
+            current_status = status_name
+            console.print(f"\n[bold cyan]{status_name}[/bold cyan]")
+
+        icon = status_icons.get(status_name, "◻️")
+        console.print(f"{icon} {key}: {summary}")
+        console.print(f"   🔗 {issue_url}")
+        console.print(f"   Status: {status_name} | Priority: {priority_name} | Assignee: {assignee_name or 'Unassigned'}")
+
+    console.print("\n" + "=" * 60)
+    console.print(f"Total: {len(issues_sorted)} issue(s)  |  Open/active: {open_count}  |  Done/closed: {done_count}")
+
+
 def handle_jira_command(command_parts, agent=None):
     """
     Handles Jira commands:
@@ -1325,6 +1556,10 @@ def handle_jira_command(command_parts, agent=None):
     - /jira sprint - List sprint board tasks
     - /jira issues - List all open issues
     - /jira get AIE-123 - Get issue details
+    - /jira add-board 1726 - Save a board by id
+    - /jira list-board - List saved boards
+    - /jira list-board 1726 - List issues on a board (grouped by status, done last)
+    - /jira remove-board 1726 - Remove a saved board
     """
     config = load_config()
     
@@ -1343,9 +1578,13 @@ def handle_jira_command(command_parts, agent=None):
     if len(command_parts) < 2:
         # Show interactive menu
         console.print("[bold]Jira Commands:[/bold]")
-        console.print("  /jira sprint          - List your sprint board tasks")
-        console.print("  /jira issues          - List all your open issues")
-        console.print("  /jira get AIE-123     - Get details for a specific issue")
+        console.print("  /jira sprint            - List your sprint board tasks")
+        console.print("  /jira issues            - List all your open issues")
+        console.print("  /jira get AIE-123       - Get details for a specific issue")
+        console.print("  /jira add-board 1726    - Save a board by its id")
+        console.print("  /jira list-board        - List your saved boards")
+        console.print("  /jira list-board 1726   - List issues on a saved board (grouped by status)")
+        console.print("  /jira remove-board 1726 - Remove a saved board")
         return
     
     action = command_parts[1]
@@ -1355,7 +1594,19 @@ def handle_jira_command(command_parts, agent=None):
         from skills.jira import JiraSkill
         skill = JiraSkill()
         skill.configure(config)
-        
+
+        if action in ("add-board", "addboard", "board-add"):
+            handle_jira_add_board(command_parts, skill, config)
+            return
+
+        if action in ("list-board", "listboard", "boards", "list-boards"):
+            handle_jira_list_board(command_parts, skill, config)
+            return
+
+        if action in ("remove-board", "removeboard", "rm-board", "delete-board"):
+            handle_jira_remove_board(command_parts, config)
+            return
+
         if action == "sprint":
             console.print("[dim]Fetching your sprint tasks...[/dim]")
             tools = skill.get_tools()
@@ -1970,11 +2221,36 @@ def main():
                 parts = user_input.split()
                 if len(parts) < 2:
                     console.print(f"[bold]Current Provider:[/bold] {agent.llm_provider} (Model: {agent.llm_model})")
-                    console.print("Usage: /provider [list|openai|llama|deepseek] [model_name (optional)]")
+                    console.print("Usage: /provider [list|models|<provider>] [model_name (optional)]")
+                    console.print("[dim]  provider models  - fetch live models from the endpoint and pick one[/dim]")
                 elif parts[1].lower() == "list":
                     console.print("[bold]Available Providers & Models:[/bold]")
                     console.print(agent.get_available_models())
                     console.print(f"\n[bold]Current:[/bold] {agent.llm_provider} (Model: {agent.llm_model})")
+                elif parts[1].lower() == "models":
+                    # Fetch live models from the endpoint and let the user pick one.
+                    # Optional 3rd arg overrides which provider to query.
+                    target_provider = parts[2].lower() if len(parts) > 2 else agent.llm_provider
+                    console.print(f"[dim]Fetching models from provider '{target_provider}'...[/dim]")
+                    try:
+                        from core.runtime import fetch_provider_models
+                        cfg = load_config()
+                        models = fetch_provider_models(target_provider, cfg)
+                        default_idx = models.index(agent.llm_model) if agent.llm_model in models else 0
+                        idx = interactive_menu(
+                            f"Select a model for '{target_provider}' (Enter to choose, q to cancel)",
+                            models, default_idx
+                        )
+                        if idx is not None and idx >= 0:
+                            chosen = models[idx]
+                            msg = agent.set_provider(target_provider, chosen)
+                            console.print(f"[green]{msg}[/green]")
+                            cfg["LLM_PROVIDER"] = agent.llm_provider
+                            cfg["LLM_MODEL"] = agent.llm_model
+                            save_config(cfg)
+                            console.print("[dim]Preference saved to config.json[/dim]")
+                    except Exception as e:
+                        console.print(f"[red]Could not fetch models: {e}[/red]")
                 else:
                     provider = parts[1]
                     model = parts[2] if len(parts) > 2 else None
