@@ -19,9 +19,19 @@ from google.adk.agents import LlmAgent
 from .toolsets import skill_tools
 
 # Skills owned by a sub-agent. The root toolset excludes these so the two
-# selection mechanisms never both offer the same tool.
-SUBAGENT_SKILLS = ["jira", "Email Manager", "File System Manager",
-                   "Git Version Control", "Survey Automator"]
+# selection mechanisms never both claim the same tool.
+#
+# NOTE: Filesystem and git were previously owned by devtools_agent, which meant
+# the root agent couldn't simply call them -- it had to issue a
+# transfer_to_agent first, and the transfer prompt the model generated asked
+# the user for explicit confirmation before proceeding ("Would you like me to
+# transfer you..."). That's annoying for tasks like "commit and push". We now
+# keep filesystem/git tools directly on the root agent so the model can call
+# them in a single step, same as weather or web_search. The jira/email/survey
+# specialists stay as sub-agents because they have heavy/destructive schemas or
+# drive external browsers where the specialist's instruction is genuinely
+# load-bearing.
+SUBAGENT_SKILLS = ["jira", "Email Manager", "Survey Automator"]
 
 
 def build_subagents() -> List[LlmAgent]:

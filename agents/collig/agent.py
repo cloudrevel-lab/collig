@@ -25,6 +25,7 @@ from .plugins import TokenStatsPlugin, TrivialQueryPlugin
 from .providers import ProviderError, resolve_model
 from .subagents import SUBAGENT_SKILLS, build_subagents
 from .toolsets import SkillToolset
+from .trace_plugin import TracePlugin
 
 logger = logging.getLogger(__name__)
 
@@ -157,12 +158,15 @@ token_stats_plugin = TokenStatsPlugin()
 # CachedContent API, which none of Collig's providers (OpenAI, DeepSeek,
 # DashScope, Ollama -- all via LiteLLM) implement, so it is deliberately left
 # unset. OpenAI-compatible endpoints cache prompt prefixes automatically.
+trace_plugin = TracePlugin()
+
 app = App(
     name=APP_NAME,
     root_agent=root_agent,
     plugins=[
         TrivialQueryPlugin(),
         token_stats_plugin,
+        trace_plugin,
         ContextFilterPlugin(num_invocations_to_keep=CONTEXT_INVOCATIONS_TO_KEEP),
     ],
 )

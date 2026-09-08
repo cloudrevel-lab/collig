@@ -1,45 +1,56 @@
 import os
 import re
 import json
+import threading
+import time as time_module
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple
 from skills.manager import SkillManager
-from skills.builtins import TimeSkill, BrowserSkill, ThinkingToggleSkill, set_agent_instance
-from skills.filesystem import FileSystemSkill
-from skills.programming import ProgrammingSkill
-from skills.email import EmailSkill
-from skills.setup import SetupWizardSkill
-from skills.chat import ChatSkill
-from skills.map import MapSkill
-from skills.system import SystemSkill
-from skills.memory import MemorySkill
-from skills.loader import SkillLoader
-from skills.weather import WeatherSkill
-from skills.bookmark import BookmarkSkill
-from skills.news import NewsSkill
-from skills.profile import ProfileSkill
-from skills.git import GitSkill
-from skills.date_calculator import DateCalculatorSkill
-from skills.cache import CacheSkill
-from skills.lunar_calendar import LunarCalendarSkill
-from skills.menu import MenuSkill
-from skills.survey import SurveySkill
-from skills.diary import DiarySkill
-from skills.web_search import WebSearchSkill
-from skills.jira import JiraSkill
 from core.session import SessionManager
 from core.paths import paths
 
 from rich.console import Console
 
-from langchain_openai import ChatOpenAI
-from langchain_ollama import ChatOllama
-from langgraph.prebuilt import create_react_agent
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
-from langchain_core.tools import tool
+# NOTE: heavy skill-class imports and LangChain imports are intentionally
+# deferred to inside the functions that use them (see _register_initial_skills
+# and _init_langchain_agent). This keeps the module import instant so the
+# interactive CLI prompt can appear before skills finish loading.
 
 # Rich console for properly formatted output
 console = Console()
+
+# Lazy singleton: the module previously had `agent = Agent()` at the bottom,
+# which ran all of skill registration + external loading + LangChain init
+# synchronously during import. Now callers use get_agent() (or the legacy
+# `from agent import agent` which routes through __getattr__) to get the
+# singleton, and construction is guaranteed cheap -- expensive work is
+# deferred to ensure_ready() / first use.
+_agent_singleton: Optional["Agent"] = None
+_agent_singleton_lock = threading.Lock()
+
+__all__ = ["Agent", "get_agent", "console"]
+
+
+def get_agent() -> "Agent":
+    """Return the process-wide Agent instance, building a cheap skeleton on first call.
+
+    Skills + LangChain agent are NOT loaded yet here. Call
+    ``agent.ensure_ready()`` (or ``agent.load_skills_async()``) when ready.
+    """
+    global _agent_singleton
+    if _agent_singleton is None:
+        with _agent_singleton_lock:
+            if _agent_singleton is None:
+                _agent_singleton = Agent()
+    return _agent_singleton
+
+
+def __getattr__(name):
+    # Legacy `from agent import agent` support.
+    if name == "agent":
+        return get_agent()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 # Patterns that indicate a trivial query (no tools needed)
 _TRIVIAL_PATTERNS = [
@@ -107,9 +118,9 @@ def estimate_tokens(text: str) -> int:
     return len(text) // 4
 
 
-def extract_token_usage(message: AIMessage) -> Tuple[int, int]:
+def extract_token_usage(message) -> Tuple[int, int]:
     """
-    Extract token usage from AIMessage if available in metadata.
+    Extract token usage from an AIMessage if available in metadata.
     Returns (prompt_tokens, completion_tokens).
     """
     prompt_tokens = 0
@@ -376,51 +387,156 @@ def _filter_tools_for_message(message: str, all_tools: list) -> list:
 
 class Agent:
     def __init__(self):
-        import time as time_module
-        init_start = time_module.time()
+        """
+        Cheap skeleton constructor. Returns in <10ms.
 
+        Skills, external skill discovery, and the LangChain/LangGraph
+        agent are intentionally NOT initialized here.  Trigger them via
+        ``ensure_ready()`` (synchronous, blocking) or ``load_skills_async()``
+        (background thread).  The first call to ``process_message()`` will
+        call ``ensure_ready()`` automatically if needed, so you can start
+        the CLI prompt and let the user chat as soon as skills are ready.
+        """
         self.name = "Collig"
         self.skill_manager = SkillManager()
         self.session_manager = SessionManager()
         self.token_stats_manager = TokenStatsManager(paths.sessions_dir)
-        self.shared_context = {} # Store runtime context (e.g., last_created_dir)
-        self.active_skill_name = None # For multi-turn skills
-        self.verbose = True # Show thinking messages by default
+        self.shared_context = {}
+        self.active_skill_name = None
+        self.verbose = True
 
-        # Load provider config from config.json (persistence) AND env
-        # Config.json takes precedence for user preference
-        import json
+        # Provider / model -- resolve quickly without pulling skills.
+        # Prefer the new unified flat names (provider, llm_model), fall
+        # back to legacy LLM_PROVIDER / LLM_MODEL, then env, then defaults.
+        # The full precedence chain lives in core.runtime.get_llm_config.
+        self.llm_provider = os.getenv("LLM_PROVIDER", "openai")
+        self.llm_model = os.getenv("LLM_MODEL", "gpt-4o")
         try:
             with open(paths.global_config_file, "r") as f:
                 config = json.load(f)
-                self.llm_provider = config.get("LLM_PROVIDER", os.getenv("LLM_PROVIDER", "openai"))
-                self.llm_model = config.get("LLM_MODEL", os.getenv("LLM_MODEL", "gpt-4o"))
-                self.verbose = config.get("VERBOSE_THINKING", True)
+            # Prefer new unified names, fall back to legacy keys (and env above)
+            self.llm_provider = (
+                config.get("provider")
+                or config.get("LLM_PROVIDER")
+                or self.llm_provider
+            )
+            self.llm_model = (
+                config.get("llm_model")
+                or config.get("LLM_MODEL")
+                or self.llm_model
+            )
+            self.verbose = config.get("VERBOSE_THINKING", True)
         except Exception:
-             self.llm_provider = os.getenv("LLM_PROVIDER", "openai")
-             self.llm_model = os.getenv("LLM_MODEL", "gpt-4o")
-             self.verbose = True
+            pass
 
-        console.print(f"[dim]Basic setup: {time_module.time() - init_start:.2f}s[/dim]")
+        self.llm_provider = (self.llm_provider or "openai").lower()
 
-        skills_start = time_module.time()
-        self._register_initial_skills()
-        console.print(f"[dim]Initial skills registered: {time_module.time() - skills_start:.2f}s[/dim]")
+        # Placeholders populated by ensure_ready() / _init_langchain_agent().
+        self.llm = None
+        self.tools: List[Any] = []
+        self.all_tools: List[Any] = []
+        self.agent_executor = None
 
-        external_start = time_module.time()
-        self._load_external_skills()
-        console.print(f"[dim]External skills loaded: {time_module.time() - external_start:.2f}s[/dim]")
+        # Lazy-init locking & state.
+        self._skills_loaded = False
+        self._agent_initialized = False
+        self._ready_lock = threading.Lock()
+        self._ready_event = threading.Event()
+        self._async_loader_thread = None
 
-        # Set global agent reference for skills that need it
-        from skills.builtins import set_agent_instance
-        set_agent_instance(self)
+    # ------------------------------------------------------------------
+    # Lazy readiness
+    # ------------------------------------------------------------------
 
-        # Initialize LangChain/LangGraph Agent
-        langchain_start = time_module.time()
-        console.print(f"[dim]Initializing LangChain agent...[/dim]")
-        self._init_langchain_agent()
-        console.print(f"[dim]LangChain agent initialized: {time_module.time() - langchain_start:.2f}s[/dim]")
-        console.print(f"[dim]Total agent initialization: {time_module.time() - init_start:.2f}s[/dim]")
+    def is_ready(self) -> bool:
+        """True once skills are loaded AND the LangChain agent is built."""
+        return self._skills_loaded and self._agent_initialized
+
+    def load_skills_async(self, config: Optional[Dict[str, Any]] = None,
+                          on_done=None) -> threading.Thread:
+        """Start a background thread that calls ensure_ready().
+
+        Returns the started thread (caller can ignore it or .join()).
+        ``on_done``, if given, is called from the loader thread after
+        ``ensure_ready()`` completes (success or failure).
+        """
+        if self._async_loader_thread is not None:
+            return self._async_loader_thread
+        def _run():
+            try:
+                self.ensure_ready(config)
+            except Exception as exc:
+                console.print(f"[bold red]Background skill load failed:[/bold red] {exc}")
+            finally:
+                if on_done is not None:
+                    try:
+                        on_done(self)
+                    except Exception:
+                        pass
+        t = threading.Thread(target=_run, name="collig-skill-loader", daemon=True)
+        self._async_loader_thread = t
+        t.start()
+        return t
+
+    def ensure_ready(self, config: Optional[Dict[str, Any]] = None) -> None:
+        """Block until skills are loaded and the LangChain agent is built.
+
+        Idempotent and thread-safe. Subsequent calls are no-ops.
+        """
+        if self._ready_event.is_set():
+            return
+        with self._ready_lock:
+            if self._ready_event.is_set():
+                return
+
+            start = time_module.time()
+
+            if not self._skills_loaded:
+                skills_start = time_module.time()
+                self._register_initial_skills()
+                console.print(
+                    f"[dim]Initial skills registered: "
+                    f"{time_module.time() - skills_start:.2f}s[/dim]"
+                )
+                external_start = time_module.time()
+                self._load_external_skills()
+                console.print(
+                    f"[dim]External skills loaded: "
+                    f"{time_module.time() - external_start:.2f}s[/dim]"
+                )
+                # Set global agent reference for skills that need it.
+                from skills.builtins import set_agent_instance
+                set_agent_instance(self)
+                # Apply user configuration to the skill manager + each skill
+                # (only after skills are registered, so configure() sees them).
+                if config is not None:
+                    try:
+                        self.skill_manager.configure(config)
+                    except Exception as exc:
+                        console.print(f"[yellow]skill_manager.configure failed:[/yellow] {exc}")
+                    for skill in self.skill_manager.skills:
+                        try:
+                            skill.configure(config)
+                        except Exception as exc:
+                            console.print(
+                                f"[yellow]skill {getattr(skill, 'name', '?')} configure failed:[/yellow] {exc}"
+                            )
+                self._skills_loaded = True
+
+            if not self._agent_initialized:
+                langchain_start = time_module.time()
+                console.print("[dim]Initializing LangChain agent...[/dim]")
+                self._init_langchain_agent()
+                console.print(
+                    f"[dim]LangChain agent initialized: "
+                    f"{time_module.time() - langchain_start:.2f}s[/dim]"
+                )
+                self._agent_initialized = True
+
+            console.print(
+                f"[dim]Agent ready (total {time_module.time() - start:.2f}s)[/dim]"
+            )
+            self._ready_event.set()
 
     def set_provider(self, provider: str, model: str = None):
         """Switches the LLM provider (openai/ollama/llama/deepseek/dashscope)."""
@@ -443,6 +559,8 @@ class Agent:
             self.llm_model = self.llm_model or "gpt-4o"
 
         console.print(f"Switching provider to {self.llm_provider} (Model: {self.llm_model})")
+        # Ensure skills are registered so _init_langchain_agent picks up all tools.
+        self.ensure_ready()
         self._init_langchain_agent()
         return f"Provider switched to {self.llm_provider} ({self.llm_model})"
 
@@ -543,34 +661,70 @@ class Agent:
             return None
 
     def _register_initial_skills(self):
-        """Registers the built-in skills."""
-        self.skill_manager.register_skill(TimeSkill())
-        self.skill_manager.register_skill(BrowserSkill())
-        self.skill_manager.register_skill(ThinkingToggleSkill())
-        self.skill_manager.register_skill(WeatherSkill())
-        self.skill_manager.register_skill(FileSystemSkill())
-        self.skill_manager.register_skill(EmailSkill())
-        # self.skill_manager.register_skill(ProgrammingSkill())
-        # self.skill_manager.register_skill(SetupWizardSkill())
-        # self.skill_manager.register_skill(MapSkill())
-        self.skill_manager.register_skill(SystemSkill())
-        self.skill_manager.register_skill(MemorySkill())
-        self.skill_manager.register_skill(BookmarkSkill())
-        self.skill_manager.register_skill(NewsSkill())
-        self.skill_manager.register_skill(ProfileSkill())
-        self.skill_manager.register_skill(GitSkill())
-        self.skill_manager.register_skill(DateCalculatorSkill())
-        self.skill_manager.register_skill(CacheSkill())
-        self.skill_manager.register_skill(LunarCalendarSkill())
-        self.skill_manager.register_skill(MenuSkill())
-        self.skill_manager.register_skill(SurveySkill())
-        self.skill_manager.register_skill(DiarySkill())
-        self.skill_manager.register_skill(WebSearchSkill())
-        self.skill_manager.register_skill(JiraSkill())
-        # self.skill_manager.register_skill(ChatSkill()) # Fallback / General Skill
+        """Registers the built-in skills.
+
+        Skill classes are imported locally so that the top of agent.py loads
+        instantly -- importing skills here can pull in Playwright, ChromaDB,
+        news libraries, etc, and we want that work to happen lazily.
+        """
+        from skills.builtins import (
+            TimeSkill, BrowserSkill, ThinkingToggleSkill,
+        )
+        from skills.filesystem import FileSystemSkill
+        from skills.email import EmailSkill
+        from skills.system import SystemSkill
+        from skills.memory import MemorySkill
+        from skills.weather import WeatherSkill
+        from skills.bookmark import BookmarkSkill
+        from skills.news import NewsSkill
+        from skills.profile import ProfileSkill
+        from skills.git import GitSkill
+        from skills.date_calculator import DateCalculatorSkill
+        from skills.cache import CacheSkill
+        from skills.lunar_calendar import LunarCalendarSkill
+        from skills.menu import MenuSkill
+        from skills.survey import SurveySkill
+        from skills.diary import DiarySkill
+        from skills.web_search import WebSearchSkill
+        from skills.jira import JiraSkill
+
+        register = self.skill_manager.register_skill
+        register(TimeSkill())
+        register(BrowserSkill())
+        register(ThinkingToggleSkill())
+        register(WeatherSkill())
+        register(FileSystemSkill())
+        register(EmailSkill())
+        # register(ProgrammingSkill())
+        # register(SetupWizardSkill())
+        # register(MapSkill())
+        register(SystemSkill())
+        register(MemorySkill())
+        register(BookmarkSkill())
+        register(NewsSkill())
+        register(ProfileSkill())
+        register(GitSkill())
+        register(DateCalculatorSkill())
+        register(CacheSkill())
+        register(LunarCalendarSkill())
+        register(MenuSkill())
+        register(SurveySkill())
+        register(DiarySkill())
+        register(WebSearchSkill())
+        register(JiraSkill())
+        # register(ChatSkill())  # Fallback / General Skill
 
     def _init_langchain_agent(self):
-        """Initializes the LangChain Agent with tools from skills."""
+        """Initializes the LangChain Agent with tools from skills.
+
+        Safe to call before skills are loaded (tools will be empty).
+        LangChain and skill-class imports are done locally to keep the
+        module import instant at CLI startup.
+        """
+        # Local imports: these are expensive (pull in LangChain + Ollama SDK)
+        from langchain_openai import ChatOpenAI
+        from langchain_ollama import ChatOllama
+        from langgraph.prebuilt import create_react_agent
 
         self.llm = None
 
@@ -644,22 +798,22 @@ class Agent:
                     config = json.load(f)
             except Exception:
                 config = {}
-            
+
             endpoint_region = config.get("DASHSCOPE_ENDPOINT", "china")
-            
+
             # DashScope endpoint URLs
             endpoints = {
                 "china": "https://dashscope.aliyuncs.com/compatible-mode/v1",
                 "singapore": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
                 "international": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
             }
-            
+
             base_url = endpoints.get(endpoint_region, endpoints["china"])
-            
+
             # Default model for DashScope if not set
             if not self.llm_model or self.llm_model == "gpt-4o":
                 self.llm_model = "qwen-plus"
-            
+
             # DashScope uses OpenAI-compatible API
             self.llm = ChatOpenAI(
                 model=self.llm_model,
@@ -764,7 +918,10 @@ After searching, provide a natural, helpful answer that:
         # Store all tools for reference, but we'll filter dynamically per message
         self.all_tools = self.tools[:]
 
-        self.agent_executor = create_react_agent(self.llm, self.all_tools, prompt=system_prompt)
+        if self.llm is not None:
+            self.agent_executor = create_react_agent(self.llm, self.all_tools, prompt=system_prompt)
+        else:
+            self.agent_executor = None
 
     def _load_external_skills(self):
         """
@@ -786,6 +943,7 @@ After searching, provide a natural, helpful answer that:
         if not imported_dir.exists():
             return
 
+        from skills.loader import SkillLoader
         loader = SkillLoader(skills_dir=imported_dir)
         for skill in loader.load_skills():
             self.skill_manager.register_skill(skill)
@@ -799,6 +957,8 @@ After searching, provide a natural, helpful answer that:
         """
         if not history:
             return []
+
+        from langchain_core.messages import HumanMessage, AIMessage
 
         # Configuration for compression
         RAW_CONTEXT_COUNT = 3
@@ -904,6 +1064,14 @@ After searching, provide a natural, helpful answer that:
         Process a user message, optionally within a session context.
         If verbose is not specified, uses the instance's verbose setting.
         """
+        # Make sure skills + LangChain agent are fully initialized before
+        # we attempt tool selection or LLM calls. Idempotent + thread-safe;
+        # returns instantly if already ready.
+        self.ensure_ready()
+
+        from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+        from langgraph.prebuilt import create_react_agent
+
         if verbose is None:
             verbose = self.verbose
 
@@ -1134,6 +1302,9 @@ Specific tool hints:
         Process a trivial message (greeting, simple math, etc.) without any tools.
         This saves significant tokens by avoiding tool schema injection.
         """
+        self.ensure_ready()
+        from langchain_core.messages import HumanMessage
+
         total_prompt_tokens = 0
         total_completion_tokens = 0
 
@@ -1191,4 +1362,5 @@ Specific tool hints:
         return self.token_stats_manager.get_overall_summary()
 
 
-agent = Agent()
+# Legacy `agent = Agent()` removed. Use get_agent() or `from agent import agent`
+# (the latter goes through __getattr__ to get_agent()).

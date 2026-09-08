@@ -71,11 +71,11 @@ class SkillCommandCompleter(Completer):
             ("verbose", "Show thinking messages"),
             ("toggle thinking", "Toggle thinking messages visibility"),
             ("toggle markdown", "Toggle markdown rendering"),
-            ("console", "Admin console management"),
-            ("console status", "Check if the admin console is running"),
-            ("console start", "Start the admin console"),
-            ("console stop", "Stop the admin console"),
-            ("console restart", "Restart the admin console"),
+            ("console", "Collig web management"),
+            ("console status", "Check if Collig web is running"),
+            ("console start", "Start Collig web"),
+            ("console stop", "Stop Collig web"),
+            ("console restart", "Restart Collig web"),
             ("console open", "Open the console in your browser"),
             ("jira", "Jira management - list sprint tasks, issues, or get issue details"),
             ("jira sprint", "List your sprint board tasks"),
@@ -528,11 +528,11 @@ def handle_load_command(command_parts):
         return
 
     console.print("[bold]Loading and merging data...[/bold]")
-    
+
     try:
         import tempfile
         import uuid
-        
+
         # Try to import ChromaDB utilities for merging
         try:
             from langchain_chroma import Chroma
@@ -542,21 +542,21 @@ def handle_load_command(command_parts):
         except ImportError:
             CHROMA_AVAILABLE = False
             console.print("[yellow]Warning: ChromaDB not available, skipping vector store merge.[/yellow]")
-        
+
         # Create a temporary directory to extract the backup
         temp_dir = tempfile.mkdtemp(prefix="collig_load_")
         console.print(f"[dim]Extracting backup to temporary directory...[/dim]")
-        
+
         with zipfile.ZipFile(zip_path, 'r') as zipf:
             zipf.extractall(temp_dir)
-        
+
         # Find the extracted .collig directory
         extracted_collig = None
         for item in os.listdir(temp_dir):
             if item == ".collig" or item.endswith(".collig"):
                 extracted_collig = os.path.join(temp_dir, item)
                 break
-        
+
         # If not found, the backup might be the contents directly
         if not extracted_collig:
             # Check if we have data/sessions dirs directly in temp_dir
@@ -566,9 +566,9 @@ def handle_load_command(command_parts):
                 console.print("[bold red]Error:[/bold red] Could not find .collig data in backup file.")
                 shutil.rmtree(temp_dir)
                 return
-        
+
         merged_count = {"sessions": 0, "bookmarks": 0, "notes": 0, "diary": 0, "config": 0}
-        
+
         # 1. Merge Sessions (JSON files) - skip existing IDs
         source_sessions = os.path.join(extracted_collig, "sessions")
         if os.path.exists(source_sessions):
@@ -577,21 +577,21 @@ def handle_load_command(command_parts):
                 if fname.endswith(".json") and not fname.endswith("_stats.json"):
                     src_path = os.path.join(source_sessions, fname)
                     dst_path = os.path.join(paths.sessions_dir, fname)
-                    
+
                     # Skip if already exists
                     if os.path.exists(dst_path):
                         continue
-                    
+
                     # Copy new session
                     shutil.copy2(src_path, dst_path)
                     merged_count["sessions"] += 1
-                    
+
                     # Also copy stats if available
                     stats_fname = fname.replace(".json", "_stats.json")
                     src_stats = os.path.join(source_sessions, stats_fname)
                     if os.path.exists(src_stats):
                         shutil.copy2(src_stats, os.path.join(paths.sessions_dir, stats_fname))
-        
+
         # 2. Merge ChromaDB data (bookmarks, notes, diary, memory_notes)
         if CHROMA_AVAILABLE:
             source_data = os.path.join(extracted_collig, "data")
@@ -605,32 +605,32 @@ def handle_load_command(command_parts):
                             api_key = config.get("OPENAI_API_KEY", "")
                     except:
                         pass
-                
+
                 if api_key:
                     embeddings = OpenAIEmbeddings(api_key=api_key)
-                    
+
                     # Merge bookmarks
                     source_bookmarks = os.path.join(source_data, "bookmarks")
                     if os.path.exists(source_bookmarks):
                         try:
                             console.print("[dim]Merging bookmarks...[/dim]")
-                            target_store = Chroma(persist_directory=paths.get_skill_data_dir("bookmarks"), 
+                            target_store = Chroma(persist_directory=paths.get_skill_data_dir("bookmarks"),
                                                  embedding_function=embeddings, collection_name="user_bookmarks")
-                            source_store = Chroma(persist_directory=source_bookmarks, 
+                            source_store = Chroma(persist_directory=source_bookmarks,
                                                  embedding_function=embeddings, collection_name="user_bookmarks")
-                            
+
                             # Get all from source
                             source_data_all = source_store._collection.get(include=["documents", "metadatas", "embeddings"])
                             if source_data_all.get("ids"):
                                 # Get existing IDs in target
                                 target_ids = set(target_store._collection.get(include=[])["ids"])
-                                
+
                                 # Filter out existing
                                 new_ids = []
                                 new_docs = []
                                 new_metas = []
                                 new_embeds = []
-                                
+
                                 for i, doc_id in enumerate(source_data_all["ids"]):
                                     if doc_id not in target_ids:
                                         new_ids.append(doc_id)
@@ -638,37 +638,37 @@ def handle_load_command(command_parts):
                                         new_metas.append(source_data_all["metadatas"][i])
                                         if "embeddings" in source_data_all and source_data_all["embeddings"]:
                                             new_embeds.append(source_data_all["embeddings"][i])
-                                
+
                                 if new_ids:
                                     # Add with embeddings if available
                                     if new_embeds:
-                                        target_store._collection.add(ids=new_ids, documents=new_docs, 
+                                        target_store._collection.add(ids=new_ids, documents=new_docs,
                                                                    metadatas=new_metas, embeddings=new_embeds)
                                     else:
                                         target_store._collection.add(ids=new_ids, documents=new_docs, metadatas=new_metas)
                                     merged_count["bookmarks"] = len(new_ids)
                         except Exception as e:
                             console.print(f"[dim]Bookmark merge skipped: {e}[/dim]")
-                    
+
                     # Merge memory_notes
                     source_memory = os.path.join(source_data, "memory_notes")
                     if os.path.exists(source_memory):
                         try:
                             console.print("[dim]Merging notes...[/dim]")
-                            target_store = Chroma(persist_directory=paths.get_skill_data_dir("memory_notes"), 
+                            target_store = Chroma(persist_directory=paths.get_skill_data_dir("memory_notes"),
                                                  embedding_function=embeddings, collection_name="user_memory")
-                            source_store = Chroma(persist_directory=source_memory, 
+                            source_store = Chroma(persist_directory=source_memory,
                                                  embedding_function=embeddings, collection_name="user_memory")
-                            
+
                             source_data_all = source_store._collection.get(include=["documents", "metadatas", "embeddings"])
                             if source_data_all.get("ids"):
                                 target_ids = set(target_store._collection.get(include=[])["ids"])
-                                
+
                                 new_ids = []
                                 new_docs = []
                                 new_metas = []
                                 new_embeds = []
-                                
+
                                 for i, doc_id in enumerate(source_data_all["ids"]):
                                     if doc_id not in target_ids:
                                         new_ids.append(doc_id)
@@ -676,36 +676,36 @@ def handle_load_command(command_parts):
                                         new_metas.append(source_data_all["metadatas"][i])
                                         if "embeddings" in source_data_all and source_data_all["embeddings"]:
                                             new_embeds.append(source_data_all["embeddings"][i])
-                                
+
                                 if new_ids:
                                     if new_embeds:
-                                        target_store._collection.add(ids=new_ids, documents=new_docs, 
+                                        target_store._collection.add(ids=new_ids, documents=new_docs,
                                                                    metadatas=new_metas, embeddings=new_embeds)
                                     else:
                                         target_store._collection.add(ids=new_ids, documents=new_docs, metadatas=new_metas)
                                     merged_count["notes"] = len(new_ids)
                         except Exception as e:
                             console.print(f"[dim]Notes merge skipped: {e}[/dim]")
-                    
+
                     # Merge diary
                     source_diary = os.path.join(source_data, "diary")
                     if os.path.exists(source_diary):
                         try:
                             console.print("[dim]Merging diary entries...[/dim]")
-                            target_store = Chroma(persist_directory=paths.get_skill_data_dir("diary"), 
+                            target_store = Chroma(persist_directory=paths.get_skill_data_dir("diary"),
                                                  embedding_function=embeddings, collection_name="user_diary")
-                            source_store = Chroma(persist_directory=source_diary, 
+                            source_store = Chroma(persist_directory=source_diary,
                                                  embedding_function=embeddings, collection_name="user_diary")
-                            
+
                             source_data_all = source_store._collection.get(include=["documents", "metadatas", "embeddings"])
                             if source_data_all.get("ids"):
                                 target_ids = set(target_store._collection.get(include=[])["ids"])
-                                
+
                                 new_ids = []
                                 new_docs = []
                                 new_metas = []
                                 new_embeds = []
-                                
+
                                 for i, doc_id in enumerate(source_data_all["ids"]):
                                     if doc_id not in target_ids:
                                         new_ids.append(doc_id)
@@ -713,10 +713,10 @@ def handle_load_command(command_parts):
                                         new_metas.append(source_data_all["metadatas"][i])
                                         if "embeddings" in source_data_all and source_data_all["embeddings"]:
                                             new_embeds.append(source_data_all["embeddings"][i])
-                                
+
                                 if new_ids:
                                     if new_embeds:
-                                        target_store._collection.add(ids=new_ids, documents=new_docs, 
+                                        target_store._collection.add(ids=new_ids, documents=new_docs,
                                                                    metadatas=new_metas, embeddings=new_embeds)
                                     else:
                                         target_store._collection.add(ids=new_ids, documents=new_docs, metadatas=new_metas)
@@ -729,10 +729,10 @@ def handle_load_command(command_parts):
                 console.print("[dim]No data directory found in backup.[/dim]")
         else:
             console.print("[yellow]ChromaDB not available, skipping intelligent merge of vector stores.[/yellow]")
-        
+
         # Cleanup temp directory
         shutil.rmtree(temp_dir)
-        
+
         # Report results
         console.print("[green]Load completed![/green]")
         if any(v > 0 for v in merged_count.values()):
@@ -747,9 +747,9 @@ def handle_load_command(command_parts):
                 console.print(f"  - {merged_count['diary']} new diary entries")
         else:
             console.print("[yellow]No new data to merge (all entries already exist).[/yellow]")
-        
+
         console.print("[dim]Tip: Use /stats to see updated session counts.[/dim]")
-        
+
     except Exception as e:
         console.print(f"[bold red]Load failed:[/bold red] {e}")
         import traceback
@@ -759,20 +759,23 @@ def get_config_schema(agent=None):
     """
     Define the configuration schema with types, descriptions, and options.
     Returns a list of config item definitions.
+
+    Order rule: rows are appended in EXACTLY the order they appear in the
+    Settings tab (the tab renderer groups by category preserving first-seen
+    order).  The LLM category is placed FIRST per user spec.
     """
     schema = []
 
-    # LLM Settings
-    schema.append({
-        "key": "LLM_MODEL",
-        "type": "string",
-        "default": "gpt-4o",
-        "category": "LLM",
-        "description": "Primary LLM model to use (e.g., gpt-4o, qwen3:8b, llama3.1)"
-    })
-
+    # ------------------------------------------------------------------
+    # LLM category FIRST (grouped with provider, url, model, api_key,
+    # cached available_models info).
+    # Every row keeps the LEGACY storage key name as item["key"] so the
+    # existing config closures (config[item["key"]]) keep working exactly
+    # as before.  Optional item["label"] is used only for friendly display.
+    # ------------------------------------------------------------------
     schema.append({
         "key": "LLM_PROVIDER",
+        "label": "LLM Provider",
         "type": "choice",
         "default": "openai",
         "options": ["openai", "ollama", "llama", "deepseek", "dashscope", "custom"],
@@ -780,9 +783,88 @@ def get_config_schema(agent=None):
         "description": "LLM provider ('custom' = any OpenAI-compatible endpoint)"
     })
 
+    schema.append({
+        "key": "CUSTOM_BASE_URL",
+        "label": "Custom Base URL (https://.../v1)",
+        "type": "string",
+        "default": "",
+        "category": "LLM",
+        "description": "Base URL for the 'custom' OpenAI-compatible provider (e.g. https://my-host/v1)"
+    })
+
+    schema.append({
+        "key": "DASHSCOPE_ENDPOINT",
+        "label": "DashScope Endpoint Region",
+        "type": "choice",
+        "default": "china",
+        "options": ["china", "singapore", "international"],
+        "category": "LLM",
+        "description": "DashScope endpoint region (china / singapore / international)"
+    })
+
+    schema.append({
+        "key": "LLM_MODEL",
+        "label": "LLM Model",
+        "type": "string",
+        "default": "gpt-4o",
+        "category": "LLM",
+        "description": "Primary LLM model to use (e.g. gpt-4o, qwen3:8b, llama3.1) · press [m] to fetch live list and pick"
+    })
+
+    schema.append({
+        "key": "OPENAI_API_KEY",
+        "label": "OpenAI API Key",
+        "type": "secret",
+        "default": "",
+        "category": "LLM",
+        "description": "API key for provider=openai"
+    })
+
+    schema.append({
+        "key": "DEEPSEEK_API_KEY",
+        "label": "DeepSeek API Key",
+        "type": "secret",
+        "default": "",
+        "category": "LLM",
+        "description": "API key for provider=deepseek"
+    })
+
+    schema.append({
+        "key": "DASHSCOPE_API_KEY",
+        "label": "DashScope API Key",
+        "type": "secret",
+        "default": "",
+        "category": "LLM",
+        "description": "API key for provider=dashscope"
+    })
+
+    schema.append({
+        "key": "CUSTOM_API_KEY",
+        "label": "Custom Endpoint API Key",
+        "type": "secret",
+        "default": "",
+        "category": "LLM",
+        "description": "API key for provider=custom (optional for local servers)"
+    })
+
+    # Cached list of models from last [m] fetch (readonly info row).
+    # The closures still read/write config dict key normally; display is
+    # overridden to show "N cached · press [m] to refresh".
+    schema.append({
+        "key": "AVAILABLE_MODELS",
+        "label": "Available Models (cached)",
+        "type": "info",
+        "default": [],
+        "category": "LLM",
+        "description": "Cached model list from last [m] refresh. Press [m] any time to re-fetch from endpoint."
+    })
+
+    # ------------------------------------------------------------------
     # UI Settings
+    # ------------------------------------------------------------------
     schema.append({
         "key": "VERBOSE_THINKING",
+        "label": "Verbose Thinking",
         "type": "boolean",
         "default": True,
         "category": "UI",
@@ -791,65 +873,31 @@ def get_config_schema(agent=None):
 
     schema.append({
         "key": "ENABLE_MARKDOWN",
+        "label": "Enable Markdown",
         "type": "boolean",
         "default": True,
         "category": "UI",
         "description": "Enable markdown rendering"
     })
 
-    # API Keys
-    schema.append({
-        "key": "OPENAI_API_KEY",
-        "type": "secret",
-        "default": "",
-        "category": "API Keys",
-        "description": "OpenAI API Key (required)"
-    })
-
+    # ------------------------------------------------------------------
+    # Non-LLM API Keys (google maps, etc.)
+    # ------------------------------------------------------------------
     schema.append({
         "key": "google_maps_api_key",
+        "label": "Google Maps API Key",
         "type": "secret",
         "default": "",
         "category": "API Keys",
         "description": "Google Maps API Key (for Map skill)"
     })
 
-    schema.append({
-        "key": "DASHSCOPE_API_KEY",
-        "type": "secret",
-        "default": "",
-        "category": "API Keys",
-        "description": "Alibaba Cloud DashScope API Key (for 阿里云/DashScope)"
-    })
-
-    schema.append({
-        "key": "CUSTOM_BASE_URL",
-        "type": "string",
-        "default": "",
-        "category": "API Keys",
-        "description": "Base URL for a custom OpenAI-compatible API (e.g. https://my-host/v1). Used when LLM_PROVIDER=custom"
-    })
-
-    schema.append({
-        "key": "CUSTOM_API_KEY",
-        "type": "secret",
-        "default": "",
-        "category": "API Keys",
-        "description": "API key for the custom OpenAI-compatible endpoint (optional for local servers)"
-    })
-
-    schema.append({
-        "key": "DASHSCOPE_ENDPOINT",
-        "type": "choice",
-        "default": "china",
-        "options": ["china", "singapore", "international"],
-        "category": "API Keys",
-        "description": "DashScope endpoint region (china: https://dashscope.aliyuncs.com, singapore: https://dashscope-intl.aliyuncs.com)"
-    })
-
+    # ------------------------------------------------------------------
     # Jira Skill Configuration
+    # ------------------------------------------------------------------
     schema.append({
         "key": "JIRA_EMAIL",
+        "label": "Jira Email",
         "type": "string",
         "default": "",
         "category": "JIRA",
@@ -858,6 +906,7 @@ def get_config_schema(agent=None):
 
     schema.append({
         "key": "JIRA_API_TOKEN",
+        "label": "Jira API Token",
         "type": "secret",
         "default": "",
         "category": "JIRA",
@@ -901,6 +950,21 @@ def interactive_config_ui(agent=None):
         if item["key"] not in config:
             config[item["key"]] = item["default"]
 
+    # Make sure the new unified flat aliases (provider, llm_model, provider_url,
+    # api_key, available_models) are mirrored into legacy storage keys so the
+    # unchanged closures (config[item["key"]]) always read/write the correct
+    # stored values.  Writes go the opposite way via save_config hook below.
+    from core.runtime import set_llm_field
+    for field, legacy_key in (
+        ("provider", "LLM_PROVIDER"),
+        ("llm_model", "LLM_MODEL"),
+    ):
+        if config.get(field) and not config.get(legacy_key):
+            config[legacy_key] = config[field]
+    # available_models -> legacy AVAILABLE_MODELS
+    if isinstance(config.get("available_models"), list) and not isinstance(config.get("AVAILABLE_MODELS"), list):
+        config["AVAILABLE_MODELS"] = list(config["available_models"])
+
     # Store original config with defaults for comparison
     original_config = config.copy()
 
@@ -927,6 +991,19 @@ def interactive_config_ui(agent=None):
 
     def get_display_value(item):
         """Get formatted value for display."""
+        if item["type"] == "info":
+            # info rows are read-only summary rows (e.g. cached available_models count)
+            if item["key"] == "AVAILABLE_MODELS":
+                raw = (
+                    config.get("available_models")
+                    or config.get("AVAILABLE_MODELS")
+                    or []
+                )
+                if isinstance(raw, list) and raw:
+                    return "%d cached · press [m] to refresh" % len(raw)
+                return "(no cached list — press [m] to fetch)"
+            # Generic info: render description as value
+            return ""
         value = config.get(item["key"], item["default"])
         if item["type"] == "boolean":
             return "ON" if value else "OFF"
@@ -970,18 +1047,19 @@ def interactive_config_ui(agent=None):
             if not first_category:
                 result.append(("dim", "  " + "─" * 50 + "\n"))
             first_category = False
-            
+
             result.append(("bold cyan", f"  {cat}\n"))
             for item in items:
                 prefix = "> " if current_index == settings_selected_index else "  "
                 value = get_display_value(item)
+                label = item.get("label", item["key"])
 
                 if current_index == settings_selected_index:
-                    result.append(("bold cyan", f"{prefix}{item['key']}: "))
+                    result.append(("bold cyan", f"{prefix}{label}: "))
                     result.append(("bold reverse", f" {value} "))
                     result.append(("", f"  {item['description']}\n"))
                 else:
-                    result.append(("", f"{prefix}{item['key']}: {value}  {item['description']}\n"))
+                    result.append(("", f"{prefix}{label}: {value}  {item['description']}\n"))
                 current_index += 1
 
         return to_formatted_text(result)
@@ -1036,6 +1114,28 @@ def interactive_config_ui(agent=None):
                     skill_changes.append(f"{skill.name}: {'enabled' if new_state else 'disabled'}")
                 config[config_key] = new_state
                 skill.enabled = new_state
+
+        # Mirror any legacy key edits into new unified flat aliases so reads
+        # via get_llm_config() (which prefers the new names) always reflect
+        # the user's edits.  This keeps both storage forms in sync on save.
+        from core.runtime import set_llm_field
+        for legacy, field in (
+            ("LLM_PROVIDER", "provider"),
+            ("LLM_MODEL", "llm_model"),
+            ("CUSTOM_BASE_URL", "provider_url"),
+            ("DASHSCOPE_ENDPOINT", "provider_url"),
+            ("OPENAI_API_KEY", "api_key"),
+            ("DEEPSEEK_API_KEY", "api_key"),
+            ("DASHSCOPE_API_KEY", "api_key"),
+            ("CUSTOM_API_KEY", "api_key"),
+            ("AVAILABLE_MODELS", "available_models"),
+        ):
+            if legacy in config and config.get(legacy) is not None:
+                set_llm_field(config, field, config.get(legacy))
+        # If user has new unified alias for available_models that was set by
+        # cache_available_models but AVAILABLE_MODELS not set, also sync legacy
+        if isinstance(config.get("available_models"), list):
+            set_llm_field(config, "available_models", config["available_models"])
 
         save_config(config)
 
@@ -1231,48 +1331,134 @@ def interactive_config_ui(agent=None):
 
         if result[0] == "edit":
             item = result[1]
+            # info rows (e.g. AVAILABLE_MODELS) are not user-editable
+            if item["type"] == "info":
+                console.print("[dim]This row is read-only. Press [m] any time to refresh available models.[/dim]")
+                continue
             current_value = config.get(item["key"], item["default"])
             is_password = item["type"] == "secret"
             # Pre-fill with the current value (empty string if unset).
             default_text = str(current_value) if current_value else ""
+            label = item.get("label", item["key"])
             try:
-                console.print(f"[dim]Editing {item['key']} - type the value and press Enter (Esc/Ctrl-C to cancel):[/dim]")
+                console.print(f"[dim]Editing {label} — type the value and press Enter (Esc/Ctrl-C to cancel):[/dim]")
                 new_value = prompt(
-                    message=f"{item['key']} = ",
+                    message=f"{label} = ",
                     default=default_text,
                     is_password=is_password,
                 )
                 if new_value is not None:
                     config[item["key"]] = new_value
-                    shown = "*" * 8 if is_password and new_value else (new_value or "(cleared)")
-                    console.print(f"[green]Set {item['key']} = {shown}[/green] [dim](press 's' to save)[/dim]")
+                    # After writing legacy key, also keep new unified alias in sync
+                    from core.runtime import set_llm_field
+                    _synced = False
+                    for field, legacy in (
+                        ("provider", "LLM_PROVIDER"),
+                        ("llm_model", "LLM_MODEL"),
+                        ("provider_url", "CUSTOM_BASE_URL"),
+                        ("provider_url", "DASHSCOPE_ENDPOINT"),
+                        ("api_key", "OPENAI_API_KEY"),
+                        ("api_key", "DEEPSEEK_API_KEY"),
+                        ("api_key", "DASHSCOPE_API_KEY"),
+                        ("api_key", "CUSTOM_API_KEY"),
+                    ):
+                        if item["key"] == legacy:
+                            set_llm_field(config, field, new_value)
+                            _synced = True
+                    shown = ("*" * 8) if (is_password and new_value) else (new_value or "(cleared)")
+                    console.print(f"[green]Set {label} = {shown}[/green] [dim](press 's' to save)[/dim]")
                 content_control.text = get_content_text()
             except (KeyboardInterrupt, EOFError):
                 console.print("[dim]Edit cancelled.[/dim]")
             except Exception as e:
-                console.print(f"[red]Could not edit {item['key']}: {e}[/red]")
+                console.print(f"[red]Could not edit {label}: {e}[/red]")
 
         elif result[0] == "fetch_models":
             # Persist the current provider/URL/key so fetch uses fresh values.
             save_config(config)
-            for k in ("CUSTOM_API_KEY", "DASHSCOPE_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY"):
+            for k in ("CUSTOM_API_KEY", "DASHSCOPE_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY",
+                      "CUSTOM_BASE_URL", "DASHSCOPE_ENDPOINT", "CUSTOM_MODELS"):
                 if config.get(k):
                     os.environ[k] = config[k]
+                elif k in os.environ:
+                    del os.environ[k]
             provider = config.get("LLM_PROVIDER", "openai")
-            console.print(f"[dim]Fetching models from provider '{provider}'...[/dim]")
+            console.print("[dim]Fetching model list for provider '%s'...[/dim]" % provider)
             try:
-                from core.runtime import fetch_provider_models
-                models = fetch_provider_models(provider, config)
+                from core.runtime import fetch_provider_models, cache_available_models, set_llm_field
+                # [m] = explicit user refresh (per spec), ignore cache and go live
+                models = fetch_provider_models(provider, config, refresh=True)
+                if not models:
+                    raise RuntimeError("Provider returned no models.")
+
+                # Persist the merged list to the cache for next-time display.
+                # persist=False because user must still press [s] to save.
+                cache_available_models(provider, models, config, persist=False)
+
                 current_model = config.get("LLM_MODEL", "")
                 default_idx = models.index(current_model) if current_model in models else 0
-                idx = interactive_menu("Select a model (Enter to choose, q to cancel)", models, default_idx)
+                # Flush before dropping into menu so user sees fetch log.
+                try:
+                    import sys
+                    sys.stdout.flush()
+                except Exception:
+                    pass
+                idx = interactive_menu(
+                    "Select a model for %s (Enter to choose, Esc/q to cancel)" % provider,
+                    models, default_idx,
+                )
                 if idx is not None and idx >= 0:
-                    config["LLM_MODEL"] = models[idx]
-                    console.print(f"[green]Selected model: {models[idx]}[/green]")
+                    chosen = models[idx]
+                    config["LLM_MODEL"] = chosen
+                    # Keep new unified alias in sync alongside legacy key
+                    set_llm_field(config, "llm_model", chosen)
+                    set_llm_field(config, "provider", provider)
+                    console.print(
+                        "[green]Selected model: %s[/green] "
+                        "[dim](saved to available_models cache; press 's' to save permanently)[/dim]"
+                        % chosen
+                    )
+                else:
+                    console.print("[dim]Model selection cancelled — cached list still updated.[/dim]")
                 content_control.text = get_content_text()
             except Exception as e:
-                console.print(f"[red]Could not fetch models: {e}[/red]")
-                console.print("[dim]Tip: select LLM_MODEL and press Enter to type a model name manually.[/dim]")
+                console.print("[red]Could not fetch models: %s[/red]" % str(e))
+                # For custom provider, offer to enter a model name directly right here
+                if provider == "custom":
+                    try:
+                        import sys
+                        sys.stdout.flush()
+                        typed = prompt(
+                            "Type a model name to use (Enter=apply, Esc=cancel): ",
+                            default=config.get("LLM_MODEL") or "",
+                        )
+                        if typed is not None:
+                            typed = typed.strip()
+                            if typed:
+                                from core.runtime import set_llm_field
+                                config["LLM_MODEL"] = typed
+                                set_llm_field(config, "llm_model", typed)
+                                console.print(
+                                    "[green]Set LLM Model = %s[/green] [dim](press 's' to save)[/dim]"
+                                    % typed
+                                )
+                                console.print(
+                                    "[dim]Tip: to pin this model in the [m] list permanently, "
+                                    "set CUSTOM_MODELS=\"%s,...\" in the LLM section.[/dim]"
+                                    % typed
+                                )
+                            else:
+                                console.print("[dim]No model name entered.[/dim]")
+                    except (KeyboardInterrupt, EOFError):
+                        console.print("[dim]Cancelled.[/dim]")
+                    except Exception as prompt_err:
+                        console.print("[dim]Could not prompt for model: %s[/dim]" % prompt_err)
+                console.print(
+                    "[dim]Tip: select the LLM Model row and press Enter to edit it "
+                    "manually. For the 'custom' provider you can also set "
+                    "CUSTOM_MODELS=\"model-a,model-b\" in the LLM section to "
+                    "pin a permanent list.[/dim]"
+                )
 
         elif result[0] == "saved":
             console.print("[green]Configuration saved successfully![/green]")
@@ -1342,11 +1528,45 @@ def handle_config_command(command_parts, agent=None):
             return
         key = command_parts[2]
         value = " ".join(command_parts[3:]) # Allow spaces in value
-        config[key] = value
+
+        # Translate short LLM aliases (provider / llm_model / provider_url /
+        # api_key / available_models) into the correct legacy storage keys
+        # AND into the new unified aliases via set_llm_field.
+        from core.runtime import set_llm_field, get_llm_config
+        llm_field_map = {
+            "provider":         "provider",
+            "LLM_PROVIDER":     "provider",
+            "llm_model":        "llm_model",
+            "LLM_MODEL":        "llm_model",
+            "api_key":          "api_key",
+            "provider_url":     "provider_url",
+            "LLM_PROVIDER_URL": "provider_url",
+        }
+        if key in llm_field_map:
+            set_llm_field(config, llm_field_map[key], value)
+        else:
+            config[key] = value
+            # After writing a legacy LLM-related key directly, also sync the
+            # new unified alias so reads via get_llm_config() stay consistent.
+            for legacy, field in (
+                ("LLM_PROVIDER",        "provider"),
+                ("LLM_MODEL",           "llm_model"),
+                ("CUSTOM_BASE_URL",     "provider_url"),
+                ("DASHSCOPE_ENDPOINT",  "provider_url"),
+                ("OPENAI_API_KEY",      "api_key"),
+                ("DEEPSEEK_API_KEY",    "api_key"),
+                ("DASHSCOPE_API_KEY",   "api_key"),
+                ("CUSTOM_API_KEY",      "api_key"),
+            ):
+                if key == legacy and config.get(legacy) is not None:
+                    set_llm_field(config, field, config.get(legacy))
+                    break
+
         save_config(config)
         console.print(f"[green]Configuration updated:[/green] {key} = {value}")
 
-        # If setting an API key, also update .env and os.environ
+        # If setting an API key (legacy key name), also update .env + os.environ.
+        # (Short "api_key" alias already synced os.environ via set_llm_field.)
         if key.endswith("_API_KEY"):
             env_file = ".env"
             if not os.path.exists(env_file):
@@ -1356,19 +1576,22 @@ def handle_config_command(command_parts, agent=None):
             os.environ[key] = value
             console.print(f"[green]Environment variable {key} updated.[/green]")
 
-        # If setting provider or model, update the agent immediately
-        if agent is not None and (key == "LLM_PROVIDER" or key == "LLM_MODEL"):
-            provider = config.get("LLM_PROVIDER", agent.llm_provider)
-            model = config.get("LLM_MODEL", agent.llm_model)
-            if key == "LLM_PROVIDER":
-                provider = value
-            else:
-                model = value
-            agent.set_provider(provider, model)
-            console.print(f"[green]Agent updated to use {provider} ({model})[/green]")
+        # If setting provider or model, update the agent immediately.
+        # Use runtime get_llm_config so both legacy + new aliases resolve.
+        if agent is not None:
+            llm_cfg = get_llm_config(config)
+            llm_changed = False
+            if key in llm_field_map and llm_field_map[key] in ("provider", "llm_model"):
+                llm_changed = True
+            elif key in ("LLM_PROVIDER", "LLM_MODEL"):
+                llm_changed = True
+            if llm_changed:
+                agent.set_provider(llm_cfg["provider"], llm_cfg["llm_model"])
+                console.print(
+                    "[green]Agent updated to use %s (%s)[/green]"
+                    % (llm_cfg["provider"], llm_cfg["llm_model"])
+                )
 
-        # Reload agent with new config?
-        # Ideally, we should restart or trigger a reload, but for now user might need to restart.
         console.print("[dim]Note: You may need to restart the session for changes to take effect in some skills.[/dim]")
     else:
         console.print(f"Unknown config action: {action}")
@@ -1562,11 +1785,11 @@ def handle_jira_command(command_parts, agent=None):
     - /jira remove-board 1726 - Remove a saved board
     """
     config = load_config()
-    
+
     # Check if Jira is configured
     jira_email = config.get("JIRA_EMAIL")
     jira_token = config.get("JIRA_API_TOKEN")
-    
+
     if not jira_email or not jira_token:
         console.print("[bold red]Jira not configured![/bold red]")
         console.print("Run [cyan]/config[/cyan] and set:")
@@ -1574,7 +1797,7 @@ def handle_jira_command(command_parts, agent=None):
         console.print("  - JIRA_API_TOKEN: Your Atlassian API token")
         console.print("\nGet your API token at: https://id.atlassian.com/manage/api-tokens")
         return
-    
+
     if len(command_parts) < 2:
         # Show interactive menu
         console.print("[bold]Jira Commands:[/bold]")
@@ -1586,9 +1809,9 @@ def handle_jira_command(command_parts, agent=None):
         console.print("  /jira list-board 1726   - List issues on a saved board (grouped by status)")
         console.print("  /jira remove-board 1726 - Remove a saved board")
         return
-    
+
     action = command_parts[1]
-    
+
     # Import and use the Jira skill directly
     try:
         from skills.jira import JiraSkill
@@ -1612,13 +1835,13 @@ def handle_jira_command(command_parts, agent=None):
             tools = skill.get_tools()
             result = tools[0].func()  # list_sprint_tasks
             console.print(result)
-            
+
         elif action == "issues":
             console.print("[dim]Fetching your open issues...[/dim]")
             tools = skill.get_tools()
             result = tools[1].func()  # list_my_issues
             console.print(result)
-            
+
         elif action == "get":
             if len(command_parts) < 3:
                 console.print("[red]Usage: /jira get ISSUE-KEY (e.g., /jira get AIE-123)[/red]")
@@ -1631,12 +1854,12 @@ def handle_jira_command(command_parts, agent=None):
         else:
             console.print(f"[red]Unknown jira command: {action}[/red]")
             console.print("Use [cyan]/jira[/cyan] for available commands.")
-            
+
     except Exception as e:
         console.print(f"[bold red]Jira command failed:[/bold red] {e}")
 
 
-# ─── Admin Console Management ──────────────────────────────────────────────────
+# ─── Collig Web Management ──────────────────────────────────────────────────
 
 _CONSOLE_HOST = "localhost"
 _CONSOLE_PORT = 5005
@@ -1670,7 +1893,7 @@ def _clear_console_pid():
 
 
 def _is_console_running():
-    """Check if the admin console is already running by probing the port."""
+    """Check if Collig web is already running by probing the port."""
     import socket
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
@@ -1683,7 +1906,7 @@ def _is_console_running():
 
 
 def _start_console_process():
-    """Start the admin console as a background subprocess."""
+    """Start Collig web as a background subprocess."""
     import subprocess
 
     collig_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -1693,7 +1916,7 @@ def _start_console_process():
         console.print(f"[yellow]Port {_CONSOLE_PORT} is already in use. Console may already be running.[/yellow]")
         return
 
-    console.print(f"[cyan]Starting admin console on http://{_CONSOLE_HOST}:{_CONSOLE_PORT} ...[/cyan]")
+    console.print(f"[cyan]Starting Collig web on http://{_CONSOLE_HOST}:{_CONSOLE_PORT} ...[/cyan]")
 
     # Determine how to run uvicorn
     core_dir = os.path.join(collig_root, "core")
@@ -1738,9 +1961,9 @@ def _start_console_process():
         if _is_console_running():
             pid = _get_console_pid()
             pid_str = f" (PID: {pid})" if pid else ""
-            console.print(f"[green]Admin console started:[/green] http://{_CONSOLE_HOST}:{_CONSOLE_PORT}/admin{pid_str}")
+            console.print(f"[green]Collig web started:[/green] http://{_CONSOLE_HOST}:{_CONSOLE_PORT}/{pid_str}")
         else:
-            console.print("[red]Failed to start admin console.[/red]")
+            console.print("[red]Failed to start Collig web.[/red]")
             try:
                 with open(log_file) as lf:
                     lines = lf.readlines()[-8:]
@@ -1756,16 +1979,16 @@ def _start_console_process():
 
 
 def _stop_console_process():
-    """Stop the running admin console process."""
+    """Stop the running Collig web process."""
     pid = _get_console_pid()
     if not pid:
-        console.print(f"[yellow]No admin console process found on port {_CONSOLE_PORT}.[/yellow]")
+        console.print(f"[yellow]No Collig web process found on port {_CONSOLE_PORT}.[/yellow]")
         return
 
     try:
         import signal
         os.kill(pid, signal.SIGTERM)
-        console.print(f"[green]Admin console stopped (PID {pid}).[/green]")
+        console.print(f"[green]Collig web stopped (PID {pid}).[/green]")
 
         # Also kill any other processes on the same port (cleanup)
         import subprocess
@@ -1791,24 +2014,24 @@ def handle_console_command(user_input):
         # Show status
         if _is_console_running():
             console.print(Panel(
-                f"[green]● Admin console is running[/green]\n\n"
-                f"  URL: [bold cyan]http://{_CONSOLE_HOST}:{_CONSOLE_PORT}/admin[/bold cyan]\n"
+                f"[green]● Collig web is running[/green]\n\n"
+                f"  URL: [bold cyan]http://{_CONSOLE_HOST}:{_CONSOLE_PORT}/[/bold cyan]\n"
                 f"  PID: {_get_console_pid()}\n"
                 f"  API: http://{_CONSOLE_HOST}:{_CONSOLE_PORT}/api/*",
-                title="Admin Console",
+                title="Collig",
                 border_style="green"
             ))
         else:
             console.print(Panel(
-                "[yellow]○ Admin console is not running[/yellow]\n\n"
+                "[yellow]○ Collig web is not running[/yellow]\n\n"
                 "  Use [bold]/console start[/bold] to launch it.",
-                title="Admin Console",
+                title="Collig",
                 border_style="yellow"
             ))
 
     elif parts[1].lower() == "start":
         if _is_console_running():
-            console.print(f"[yellow]Admin console is already running at http://{_CONSOLE_HOST}:{_CONSOLE_PORT}/admin[/yellow]")
+            console.print(f"[yellow]Collig web is already running at http://{_CONSOLE_HOST}:{_CONSOLE_PORT}/[/yellow]")
         else:
             _start_console_process()
 
@@ -1822,24 +2045,24 @@ def handle_console_command(user_input):
         _start_console_process()
 
     elif parts[1].lower() == "open":
-        """Open the admin console URL in the default browser."""
+        """Open the Collig web URL in the default browser."""
         import webbrowser
-        url = f"http://{_CONSOLE_HOST}:{_CONSOLE_PORT}/admin"
+        url = f"http://{_CONSOLE_HOST}:{_CONSOLE_PORT}/"
         if _is_console_running():
             webbrowser.open(url)
-            console.print(f"[green]Opened admin console in browser:[/green] {url}")
+            console.print(f"[green]Opened Collig web in browser:[/green] {url}")
         else:
-            console.print(f"[yellow]Admin console is not running. Start it first with [bold]/console start[/bold].[/yellow]")
+            console.print(f"[yellow]Collig web is not running. Start it first with [bold]/console start[/bold].[/yellow]")
             console.print(f"  URL would be: [cyan]{url}[/cyan]")
 
     else:
         console.print(
-            "[bold]Admin Console Commands:[/bold]\n\n"
-            "  [cyan]/console status[/cyan]  — Check if the admin console is running\n"
-            "  [cyan]/console start[/cyan]   — Start the admin console\n"
-            "  [cyan]/console stop[/cyan]    — Stop the admin console\n"
-            "  [cyan]/console restart[/cyan] — Restart the admin console\n"
-            "  [cyan]/console open[/cyan]    — Open the console in your browser"
+            "[bold]Collig Web Commands:[/bold]\n\n"
+            "  [cyan]/console status[/cyan]  — Check if Collig web is running\n"
+            "  [cyan]/console start[/cyan]   — Start Collig web\n"
+            "  [cyan]/console stop[/cyan]    — Stop Collig web\n"
+            "  [cyan]/console restart[/cyan] — Restart Collig web\n"
+            "  [cyan]/console open[/cyan]    — Open Collig in your browser"
         )
 
 
@@ -1925,9 +2148,9 @@ def main():
     if not check_setup():
         run_setup_wizard()
 
-    # Import agent - much faster now without the tagline animation!
+    # Import agent — skeleton init is <150ms; skill registration + LangChain
+    # agent load happens in a daemon thread *after* the intro banner below.
     try:
-        console.print("[dim]Importing skills...[/dim]")
         from agent import agent
         from skills.menu import set_menu_functions
         from skills.news import NewsSkill
@@ -1938,18 +2161,11 @@ def main():
         # Set the news functions for the NewsSkill
         set_news_functions(NewsSkill.get_news_cache, NewsSkill.get_last_query)
 
-        # Newline after the overwriting registration logs
-        print()
-
-        # Load and apply configuration to skills
+        # Load and apply configuration
         config = load_config()
 
         # Initialize markdown preference
         ENABLE_MARKDOWN = config.get("ENABLE_MARKDOWN", True)
-
-        agent.skill_manager.configure(config)
-        for skill in agent.skill_manager.skills:
-            skill.configure(config)
 
     except Exception as e:
         console.print(f"[bold red]Failed to initialize agent:[/bold red] {e}")
@@ -2027,6 +2243,21 @@ def main():
     console.print("[bold blue]Collig Co-worker AI - CLI Mode[/bold blue]")
     console.print("Type [bold yellow]'exit'[/bold yellow] or [bold yellow]'quit'[/bold yellow] to end the session.")
     console.print("Press [bold yellow]Ctrl+C[/bold yellow] to cancel current operation while thinking.\n")
+
+    # Kick off skill loading in a background daemon thread *after* printing the
+    # welcome banner but *before* entering the interactive prompt loop. The
+    # user sees the prompt instantly; skills register + LangChain agent builds
+    # silently in the background. The first process_message() call blocks on
+    # ensure_ready() automatically.
+    import sys
+    def _on_skills_ready(a):
+        # Rich Console is thread-safe; print an unobtrusive ready hint.
+        console.print("[dim]All skills ready[/dim]")
+    agent.load_skills_async(config=config, on_done=_on_skills_ready)
+    console.print("[dim]Skills loading in background; the prompt is ready immediately.[/dim]")
+    # Flush stdout so Rich output renders before prompt_toolkit grabs the screen
+    sys.stdout.flush()
+    sys.stderr.flush()
 
     while True:
         try:
@@ -2179,7 +2410,7 @@ def main():
 
                         # Run the menu
                         result = cache_menu.run()
-                        
+
                         # If user selected an item (Enter), load it
                         # The selected item is stored in the menu's selected_index
                         if cache_menu.selected_index is not None and cache_menu.selected_index < len(searches):
@@ -2713,19 +2944,19 @@ def main():
                 try:
                     from skills.news import NewsSkill
                     news_cache = NewsSkill.get_news_cache()
-                    
+
                     # Open news browser if:
                     # 1. NewsSkill flag is set (search_news tool was called), OR
                     # 2. There are news items in cache and response mentions news items
                     should_open_news_menu = False
-                    
+
                     if NewsSkill.has_just_searched():
                         NewsSkill.clear_search_flag()
                         should_open_news_menu = True
                     elif news_cache and result and "news" in result.get("response", "").lower():
                         # Agent mentioned news in response, check if we have cached items
                         should_open_news_menu = True
-                    
+
                     if should_open_news_menu and news_cache:
                         console.print()
                         news_query = NewsSkill.get_last_query() or "news"

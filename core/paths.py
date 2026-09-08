@@ -6,8 +6,11 @@ class Paths:
         self.home = os.path.expanduser("~/.collig")
         self.config_dir = os.path.join(self.home, "configs")
         self.data_dir = os.path.join(self.home, "data")
+        self.storage_dir = os.path.join(self.home, "storage")
         self.sessions_dir = os.path.join(self.home, "sessions")
         self.global_config_file = os.path.join(self.home, "config.json")
+
+        self.runtime_db_file = os.path.join(self.storage_dir, "collig.db")
 
         self._ensure_dirs()
 
@@ -16,6 +19,7 @@ class Paths:
         os.makedirs(self.home, exist_ok=True)
         os.makedirs(self.config_dir, exist_ok=True)
         os.makedirs(self.data_dir, exist_ok=True)
+        os.makedirs(self.storage_dir, exist_ok=True)
         os.makedirs(self.sessions_dir, exist_ok=True)
 
     def get_skill_config_dir(self, skill_name: str) -> str:

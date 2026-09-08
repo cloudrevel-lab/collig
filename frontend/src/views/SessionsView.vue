@@ -3,8 +3,14 @@
     <v-row align="center" class="mb-4">
       <v-col>
         <h1 class="text-h4 mb-0">Chat Sessions</h1>
+        <p class="text-body-2 text-medium-emphasis mt-1 mb-0">
+          Continue previous conversations or start a new one
+        </p>
       </v-col>
-      <v-col cols="auto">
+      <v-col cols="auto" class="d-flex gap-2">
+        <v-btn color="primary" variant="flat" prepend-icon="mdi-plus" to="/chat">
+          New Session
+        </v-btn>
         <v-btn color="error" variant="outlined" prepend-icon="mdi-delete-sweep"
           :disabled="selected.length === 0" @click="confirmDeleteSelected">
           Delete Selected ({{ selected.length }})
@@ -55,7 +61,11 @@
       </template>
 
       <template v-slot:item.message_count="{ item }">
-        <v-chip size="small">{{ item.message_count }}</v-chip>
+        <v-chip size="small" variant="tonal">{{ item.message_count }}</v-chip>
+      </template>
+
+      <template v-slot:item.user_messages="{ item }">
+        <span class="text-medium-emphasis">U:{{ item.user_messages }} / A:{{ item.ai_messages }}</span>
       </template>
 
       <template v-slot:item.created_at="{ item }">
@@ -67,16 +77,28 @@
       </template>
 
       <template v-slot:item.actions="{ item }">
+        <v-btn size="small" variant="flat" color="primary" prepend-icon="mdi-chat" class="mr-1" @click="continueSession(item)">
+          Continue
+        </v-btn>
         <v-icon size="small" class="mr-2" color="info" @click="viewSession(item)">mdi-eye</v-icon>
         <v-icon size="small" color="error" @click="confirmDelete(item)">mdi-delete</v-icon>
       </template>
     </v-data-table>
 
     <!-- View Session Dialog -->
-    <v-dialog v-model="viewDialog" max-width="800" scrollable>
+    <v-dialog v-model="viewDialog" max-width="900" scrollable>
       <v-card rounded="xl">
         <v-card-title>
-          Session {{ viewingSession?.id?.substring(0, 8) }}...
+          <v-row align="center">
+            <v-col>
+              Session {{ viewingSession?.id?.substring(0, 8) }}...
+            </v-col>
+            <v-col cols="auto">
+              <v-btn color="primary" size="small" prepend-icon="mdi-chat" @click="continueFromView">
+                Continue this session
+              </v-btn>
+            </v-col>
+          </v-row>
         </v-card-title>
         <v-divider />
         <v-card-text class="pt-4" style="max-height: 60vh; overflow-y: auto;">
@@ -90,6 +112,9 @@
               <div class="msg-content">{{ msg.content }}</div>
               <div class="msg-time">{{ formatTimestamp(msg.timestamp) }}</div>
             </div>
+          </div>
+          <div v-if="!viewingSession?.messages?.length" class="text-center text-medium-emphasis pa-6">
+            No messages in this session.
           </div>
         </v-card-text>
         <v-divider />
@@ -122,7 +147,9 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 
+const router = useRouter()
 const API_BASE = '/api'
 
 const sessions = ref([])
@@ -136,12 +163,13 @@ const viewingSession = ref(null)
 const deleteItem = ref(null)
 
 const headers = [
-  { title: 'Session ID', key: 'id', width: '20%' },
-  { title: 'Preview', key: 'preview', width: '35%' },
-  { title: 'Messages', key: 'message_count', width: '10%' },
-  { title: 'Created', key: 'created_at', width: '15%' },
-  { title: 'Last Activity', key: 'last_activity', width: '15%' },
-  { title: 'Actions', key: 'actions', sortable: false, width: '5%' },
+  { title: 'Session ID', key: 'id', width: '15%' },
+  { title: 'Preview', key: 'preview', width: '30%' },
+  { title: 'Messages', key: 'message_count', width: '8%' },
+  { title: 'U / A', key: 'user_messages', width: '10%', sortable: false },
+  { title: 'Created', key: 'created_at', width: '12%' },
+  { title: 'Last Activity', key: 'last_activity', width: '12%' },
+  { title: 'Actions', key: 'actions', sortable: false, width: '13%' },
 ]
 
 const filteredSessions = computed(() => {
@@ -174,6 +202,17 @@ async function viewSession(item) {
     viewDialog.value = true
   } catch (e) {
     console.error('Failed to load session:', e)
+  }
+}
+
+function continueSession(item) {
+  router.push(`/chat/${item.id}`)
+}
+
+function continueFromView() {
+  if (viewingSession.value?.id) {
+    viewDialog.value = false
+    router.push(`/chat/${viewingSession.value.id}`)
   }
 }
 

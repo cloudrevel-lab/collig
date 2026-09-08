@@ -4,7 +4,6 @@
       <v-list-item
         prepend-avatar="https://api.dicebear.com/7.x/bottts/svg?seed=collig"
         title="Collig"
-        subtitle="Admin Console"
       />
       <v-divider />
       <v-list density="compact" nav>
@@ -55,9 +54,11 @@ const menuItems = [
   { title: 'Bookmarks', icon: 'mdi-bookmark', route: '/bookmarks' },
   { title: 'Notes', icon: 'mdi-note-text', route: '/notes' },
   { title: 'Diary', icon: 'mdi-book-open-page-variant', route: '/diary' },
+  { title: 'Settings', icon: 'mdi-cog-outline', route: '/config' },
 ]
 
 const currentTitle = computed(() => {
+  if (route.path.startsWith('/chat/')) return 'Chat'
   const item = menuItems.find(i => i.route === route.path)
   return item ? item.title : 'Collig'
 })

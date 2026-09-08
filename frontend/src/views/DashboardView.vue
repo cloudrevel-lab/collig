@@ -48,6 +48,68 @@
     </v-row>
 
     <v-row class="mt-4">
+      <v-col cols="12" md="3">
+        <v-card rounded="xl" elevation="2" color="primary" variant="tonal">
+          <v-card-text class="pa-5">
+            <div class="d-flex align-center justify-space-between mb-2">
+              <span class="text-subtitle-2 font-weight-medium text-medium-emphasis">Total Tokens</span>
+              <v-icon size="22">mdi-chart-bubble</v-icon>
+            </div>
+            <div class="text-h4 font-weight-bold">{{ formatNumber(tokenStats.total_tokens) }}</div>
+            <div class="text-caption text-medium-emphasis mt-1">
+              avg {{ formatNumber(tokenStats.avg_tokens_per_turn) }} / turn
+            </div>
+          </v-card-text>
+        </v-card>
+      </v-col>
+
+      <v-col cols="12" md="3">
+        <v-card rounded="xl" elevation="2" color="info" variant="tonal">
+          <v-card-text class="pa-5">
+            <div class="d-flex align-center justify-space-between mb-2">
+              <span class="text-subtitle-2 font-weight-medium text-medium-emphasis">Interactions</span>
+              <v-icon size="22">mdi-swap-horizontal</v-icon>
+            </div>
+            <div class="text-h4 font-weight-bold">{{ formatNumber(tokenStats.total_interactions) }}</div>
+            <div class="text-caption text-medium-emphasis mt-1">
+              across {{ formatNumber(tokenStats.sessions_with_stats) }} sessions
+            </div>
+          </v-card-text>
+        </v-card>
+      </v-col>
+
+      <v-col cols="12" md="3">
+        <v-card rounded="xl" elevation="2" color="warning" variant="tonal">
+          <v-card-text class="pa-5">
+            <div class="d-flex align-center justify-space-between mb-2">
+              <span class="text-subtitle-2 font-weight-medium text-medium-emphasis">Prompt Tokens</span>
+              <v-icon size="22">mdi-send</v-icon>
+            </div>
+            <div class="text-h4 font-weight-bold">{{ formatNumber(tokenStats.total_prompt_tokens) }}</div>
+            <div class="text-caption text-medium-emphasis mt-1">
+              {{ promptRatio }}% of total
+            </div>
+          </v-card-text>
+        </v-card>
+      </v-col>
+
+      <v-col cols="12" md="3">
+        <v-card rounded="xl" elevation="2" color="success" variant="tonal">
+          <v-card-text class="pa-5">
+            <div class="d-flex align-center justify-space-between mb-2">
+              <span class="text-subtitle-2 font-weight-medium text-medium-emphasis">Completion Tokens</span>
+              <v-icon size="22">mdi-reply</v-icon>
+            </div>
+            <div class="text-h4 font-weight-bold">{{ formatNumber(tokenStats.total_completion_tokens) }}</div>
+            <div class="text-caption text-medium-emphasis mt-1">
+              {{ completionRatio }}% of total
+            </div>
+          </v-card-text>
+        </v-card>
+      </v-col>
+    </v-row>
+
+    <v-row class="mt-4">
       <v-col cols="12">
         <v-card rounded="xl" elevation="2">
           <v-card-title class="pt-4">Recent Bookmarks</v-card-title>
@@ -103,30 +165,76 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { computed, ref, onMounted } from 'vue'
 import { mdiLink } from '@mdi/js'
 
 const stats = ref({ bookmarks: 0, notes: 0, chatSessions: 0 })
 const recentBookmarks = ref([])
 const recentSessions = ref([])
+const tokenStats = ref({
+  total_tokens: 0,
+  total_interactions: 0,
+  total_prompt_tokens: 0,
+  total_completion_tokens: 0,
+  avg_tokens_per_turn: 0,
+  sessions_with_stats: 0,
+})
 
 const API_BASE = '/api'
 
+const promptRatio = computed(() => {
+  const total = tokenStats.value.total_tokens || 0
+  if (!total) return 0
+  return Math.round((tokenStats.value.total_prompt_tokens / total) * 100)
+})
+const completionRatio = computed(() => {
+  const total = tokenStats.value.total_tokens || 0
+  if (!total) return 0
+  return Math.round((tokenStats.value.total_completion_tokens / total) * 100)
+})
+
+function formatNumber(n) {
+  if (n === null || n === undefined || isNaN(n)) return '0'
+  try {
+    return new Intl.NumberFormat().format(Math.round(Number(n)))
+  } catch {
+    return String(Math.round(Number(n) || 0))
+  }
+}
+
 async function loadDashboard() {
   try {
-    const [bmRes, noteRes, sessRes] = await Promise.all([
+    const [bmRes, noteRes, sessRes, tokenRes] = await Promise.allSettled([
       fetch(`${API_BASE}/bookmarks`),
       fetch(`${API_BASE}/notes`),
       fetch(`${API_BASE}/sessions`),
+      fetch(`${API_BASE}/stats/tokens`),
     ])
-    const bmData = await bmRes.json()
-    const noteData = await noteRes.json()
-    const sessData = await sessRes.json()
-    stats.value.bookmarks = bmData.total || 0
-    stats.value.notes = noteData.total || 0
-    stats.value.chatSessions = sessData.total || 0
-    recentBookmarks.value = (bmData.bookmarks || []).slice(0, 5)
-    recentSessions.value = (sessData.sessions || []).slice(0, 5)
+    if (bmRes.status === 'fulfilled' && bmRes.value.ok) {
+      const bmData = await bmRes.value.json()
+      stats.value.bookmarks = bmData.total || 0
+      recentBookmarks.value = (bmData.bookmarks || []).slice(0, 5)
+    }
+    if (noteRes.status === 'fulfilled' && noteRes.value.ok) {
+      const noteData = await noteRes.value.json()
+      stats.value.notes = noteData.total || 0
+    }
+    if (sessRes.status === 'fulfilled' && sessRes.value.ok) {
+      const sessData = await sessRes.value.json()
+      stats.value.chatSessions = sessData.total || 0
+      recentSessions.value = (sessData.sessions || []).slice(0, 5)
+    }
+    if (tokenRes.status === 'fulfilled' && tokenRes.value.ok) {
+      const tData = await tokenRes.value.json()
+      tokenStats.value = {
+        total_tokens: tData.total_tokens || 0,
+        total_interactions: tData.total_interactions || 0,
+        total_prompt_tokens: tData.total_prompt_tokens || 0,
+        total_completion_tokens: tData.total_completion_tokens || 0,
+        avg_tokens_per_turn: tData.avg_tokens_per_turn || 0,
+        sessions_with_stats: tData.sessions_with_stats || 0,
+      }
+    }
   } catch (e) {
     console.error('Failed to load dashboard:', e)
   }
