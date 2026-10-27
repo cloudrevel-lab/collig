@@ -29,6 +29,7 @@ import json
 import os
 import shutil
 import threading
+import time
 import uuid
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
@@ -48,6 +49,7 @@ from core.runtime import (
     get_token_stats_manager,
     load_config,
     reconfigure_skills,
+    save_config,
     update_config,
 )
 from core.session import SessionManager
@@ -161,6 +163,17 @@ def _answer_text(content: Optional[types.Content]) -> str:
     return "".join(
         part.text for part in content.parts
         if part.text and not getattr(part, "thought", False)
+    )
+
+
+
+def _thought_text(content: Optional[types.Content]) -> str:
+    """Reasoning parts of a content block (the model's thinking)."""
+    if content is None or not content.parts:
+        return ""
+    return "".join(
+        part.text for part in content.parts
+        if part.text and getattr(part, "thought", False)
     )
 
 
@@ -292,23 +305,27 @@ class AgentService:
     @property
     def tools(self) -> List[Any]:
         """
-        Every tool the enabled skills provide, as plain functions.
+        Every enabled tool, as cheap name/description stubs.
 
         Read as a property rather than cached, so toggling a skill is visible
-        immediately. These are the undecorated functions, carrying ``.name``
-        and ``.description`` from ``core.tooling.tool`` -- which is what the
-        CLI's autocompletion and the Jira shortcuts use them for. The model
-        sees a narrowed subset of these, chosen per turn by ``SkillToolset``.
+        immediately.  This catalogue intentionally does not call
+        ``skill.get_tools()``: the CLI only needs names and descriptions for
+        autocompletion, and forcing every lazy skill to import just to draw a
+        prompt is the startup cost the harness exists to avoid.  The model
+        sees real tools, narrowed per turn by ``SkillToolset``.
         """
-        functions: List[Any] = []
+        from skills.base import ToolStub
+
+        stubs: List[Any] = []
         for skill in get_skill_manager().skills:
             if not skill.enabled:
                 continue
             try:
-                functions.extend(skill.get_tools())
+                for item in skill.tool_metadata():
+                    stubs.append(ToolStub(item["name"], item.get("description", "")))
             except Exception:
                 continue
-        return functions
+        return stubs
 
     # Historical alias: the LangChain agent distinguished the full tool list
     # from the filtered one, and a few call sites still ask for `all_tools`.
@@ -319,6 +336,45 @@ class AgentService:
     def refresh(self) -> None:
         """Re-read config.json into the skills after a settings change."""
         reconfigure_skills()
+
+    # Legacy compatibility surface.  The CLI used to call these on the
+    # LangChain agent; on the ADK harness they are cheap no-ops/aliases so
+    # every existing command keeps working after the migration.
+    def ensure_ready(self, config: Optional[Dict[str, Any]] = None) -> None:
+        """Idempotent readiness hook; the ADK runner is built lazily."""
+        self._ensure_runner()
+
+    def load_skills_async(self, config: Optional[Dict[str, Any]] = None,
+                          on_done=None):
+        """Warm the ADK runner in the background, then call on_done."""
+        def _run():
+            try:
+                self.ensure_ready(config)
+            finally:
+                if on_done is not None:
+                    try:
+                        on_done(self)
+                    except Exception:
+                        pass
+        thread = threading.Thread(target=_run, name="collig-harness-warm", daemon=True)
+        thread.start()
+        return thread
+
+    def _init_langchain_agent(self) -> None:
+        """Backwards-compatible alias: re-read config, do not rebuild a graph."""
+        self.refresh()
+
+    @property
+    def agent_executor(self):
+        """Legacy health-check probe; returns the ADK Runner."""
+        self._ensure_runner()
+        return self._runner
+
+    @property
+    def llm(self):
+        """Legacy probe used by diagnostics; returns the root model."""
+        self._ensure_runner()
+        return getattr(self._root_agent, "model", None)
 
     # ------------------------------------------------------------------
     # Provider
@@ -333,7 +389,8 @@ class AgentService:
         path which reconstructed the executor and all its tool bindings.
         """
         from agents.collig.agent import set_model
-        from agents.collig.providers import ProviderError, describe_provider
+        from agents.collig.providers import ProviderError
+        from core.runtime import get_llm_config, provider_base_url, set_llm_field
 
         provider = (provider or "").lower()
         model = model or default_model_for(provider)
@@ -344,8 +401,22 @@ class AgentService:
         except ProviderError as e:
             return f"Cannot switch to {provider}: {e}"
 
-        self.llm_provider, self.llm_model = describe_provider(provider, model)
-        update_config(LLM_PROVIDER=self.llm_provider, LLM_MODEL=self.llm_model)
+        # Persist the choice through the unified aliases.  Writing only
+        # LLM_PROVIDER/LLM_MODEL used to leave the newer `provider` /
+        # `llm_model` aliases stale, so the next start reverted.
+        cfg = load_config()
+        set_llm_field(cfg, "provider", provider)
+        set_llm_field(cfg, "llm_model", model)
+        scoped = get_llm_config(cfg, provider_scoped=True)
+        set_llm_field(cfg, "api_key", scoped.get("api_key") or "")
+        # DashScope stores a region, not a URL; provider_base_url maps it.
+        if provider != "dashscope":
+            url = provider_base_url(provider, cfg)
+            if url:
+                set_llm_field(cfg, "provider_url", url)
+        save_config(cfg)
+
+        self.llm_provider, self.llm_model = provider, model
         reconfigure_skills()
         return f"Provider switched to {self.llm_provider} ({self.llm_model})"
 
@@ -522,15 +593,17 @@ class AgentService:
 
     def _run_turn(self, message: str, session_id: str, verbose: bool,
                   token_callback: Optional[Callable[[str, str], None]]) -> Dict[str, Any]:
-        """Drive one invocation, rendering events as they arrive.
+        """Drive one invocation, rendering a structured thinking timeline.
 
         Uses ``google.adk.runners.Runner.run`` (the synchronous wrapper) rather
         than calling ``run_async`` via a nested event loop.  The sync wrapper
-        internally spins up its own private thread + ``asyncio.run`` and
         streams events through a ``queue.Queue``; by using it directly we
         eliminate the double-event-loop nesting that previously deadlocked the
         FastAPI sync-threadpool worker on CPython 3.13.
         """
+        from core.harness import route_message
+        from core.thinking import ThinkingBlock
+
         self._ensure_runner()
         new_message = types.Content(role="user", parts=[types.Part(text=message)])
         run_config = RunConfig(
@@ -539,14 +612,21 @@ class AgentService:
 
         final_text = ""
         invocation_id = ""
-        header_printed = False
         stream_started = False
+        route = route_message(message)
 
-        def header() -> None:
-            nonlocal header_printed
-            if verbose and not header_printed:
-                console.print("\n[Thinking Process]")
-                header_printed = True
+        display = ThinkingBlock(console, verbose)
+        display.begin(message)
+        display.route(route)
+
+        def append_final(text: str) -> None:
+            nonlocal final_text
+            if not text:
+                return
+            if final_text:
+                final_text = final_text.rstrip() + "\n\n" + text
+            else:
+                final_text = text
 
         try:
             for event in self._runner.run(
@@ -559,37 +639,32 @@ class AgentService:
                 calls = event.get_function_calls()
                 responses = event.get_function_responses()
                 text = _answer_text(event.content)
+                thought = _thought_text(event.content)
+
+                if thought:
+                    display.thought(thought)
 
                 if calls:
-                    header()
-                    reasoning = text
-                    if verbose and reasoning:
-                        console.print(f"  ➜ Reasoning: {reasoning}")
+                    # Model commentary alongside tool calls is planning text.
+                    if text:
+                        display.thought(text)
                     for call in calls:
-                        if not verbose:
-                            continue
-                        console.print(f"  ➜ Planning to use tool: [bold]{call.name}[/bold]")
                         args = _mask(call.args or {})
-                        try:
-                            pretty = json.dumps(args, indent=2, default=str)
-                        except Exception:
-                            pretty = str(args)
-                        console.print(
-                            "    Args:\n"
-                            + "\n".join("    " + line for line in pretty.splitlines())
-                        )
-                    if event.author != "user" and not event.partial and text:
-                        if final_text:
-                            final_text = final_text.rstrip() + "\n\n" + text
+                        if call.name and call.name.startswith("transfer_to_agent"):
+                            target = args.get("agent_name") if isinstance(args, dict) else None
+                            display.transfer(str(target or call.name))
                         else:
-                            final_text = text
-                        continue
+                            display.plan(call.name, args)
+                            display.tool_start(call.name)
+                    # Text emitted alongside a tool call is planning commentary,
+                    # not the answer; keep it in the thinking block only.
+                    continue
 
                 if responses:
-                    header()
-                    if verbose:
-                        for response in responses:
-                            console.print(f"    ✔ Tool '{response.name}' executed.")
+                    for response in responses:
+                        if response.name and response.name.startswith("transfer_to_agent"):
+                            continue
+                        display.tool_end(response.name)
                     continue
 
                 if not text:
@@ -598,22 +673,23 @@ class AgentService:
                 if event.partial:
                     if token_callback:
                         if not stream_started:
-                            if header_printed:
-                                console.print("[End of Thinking]\n")
-                                header_printed = False
+                            display.answering()
+                            display.finish()
                             token_callback("", "start")
                             stream_started = True
                         token_callback(text, "token")
                 elif event.author != "user":
-                    if final_text:
-                        final_text = final_text.rstrip() + "\n\n" + text
-                    else:
-                        final_text = text
+                    display.answering()
+                    append_final(text)
         except KeyboardInterrupt:
+            display.finish()
+            raise
+        except Exception as exc:
+            display.error(str(exc))
+            display.finish()
             raise
 
-        if verbose and header_printed:
-            console.print("[End of Thinking]\n")
+        display.finish()
         if stream_started and token_callback:
             token_callback("", "end")
 

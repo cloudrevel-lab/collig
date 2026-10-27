@@ -160,14 +160,28 @@ def get_llm_config(config: Optional[Dict[str, Any]] = None, *,
     # flat unified alias (which holds the *currently active* provider's URL)
     # and instead read only from legacy provider-scoped keys / defaults.
     url_key = bindings["provider_url"]
-    if provider_scoped:
-        if url_key is None:
-            provider_url = _PROVIDER_BASE_URLS.get(provider, "")
+    per_provider_url_key = f"{provider.upper()}_URL"
+    if provider == "dashscope":
+        # DASHSCOPE_ENDPOINT is a region ("china"/"singapore"), not a URL.
+        if provider_scoped:
+            provider_url = config.get(per_provider_url_key) or _dashscope_url(config)
         else:
-            provider_url = config.get(url_key) or os.getenv(url_key) or ""
+            provider_url = (
+                config.get("provider_url")
+                or config.get(per_provider_url_key)
+                or _dashscope_url(config)
+            )
+    elif provider_scoped:
+        provider_url = (
+            config.get(per_provider_url_key)
+            or (config.get(url_key) if url_key else None)
+            or (os.getenv(url_key) if url_key else "")
+            or _PROVIDER_BASE_URLS.get(provider, "")
+        )
     elif url_key is None:
         provider_url = (
             config.get("provider_url")
+            or config.get(per_provider_url_key)
             or _PROVIDER_BASE_URLS.get(provider)
             or ""
         )
@@ -175,6 +189,7 @@ def get_llm_config(config: Optional[Dict[str, Any]] = None, *,
         provider_url = (
             config.get("provider_url")
             or config.get(url_key)
+            or config.get(per_provider_url_key)
             or os.getenv(url_key)
             or ""
         )
@@ -291,20 +306,29 @@ def set_llm_field(config: Dict[str, Any], field: str, value: Any) -> Dict[str, A
 
     if field == "provider_url":
         url_key = bindings["provider_url"]
-        if url_key is None:
-            # Provider normally uses a compile-time default URL
-            # (openai / deepseek / ollama / llama) — but if the user has
-            # explicitly provided a value, use it verbatim so proxies and
-            # shim paths (/openai/v1 etc) work. Only fall back to the
-            # compile-time default when value is empty / unset.
-            if value:
-                config["provider_url"] = value
-            else:
-                config["provider_url"] = _PROVIDER_BASE_URLS.get(provider, "")
-        else:
-            config[url_key] = value or ""
+        per_provider_url_key = f"{provider.upper()}_URL"
+        if provider == "dashscope":
+            # Keep the legacy key in sync for callers that still write a URL
+            # through set_llm_field.  _dashscope_url() accepts either a region
+            # name or a full URL, so both storage styles work.
+            config[per_provider_url_key] = value or ""
             config["provider_url"] = value or ""
-            # Also mirror to env so immediately-following fetches use it
+            config["DASHSCOPE_ENDPOINT"] = value or ""
+            if value:
+                os.environ["DASHSCOPE_ENDPOINT"] = value
+            elif "DASHSCOPE_ENDPOINT" in os.environ:
+                del os.environ["DASHSCOPE_ENDPOINT"]
+            return config
+
+        if value:
+            config[per_provider_url_key] = value
+            config["provider_url"] = value
+        else:
+            config[per_provider_url_key] = ""
+            config["provider_url"] = _PROVIDER_BASE_URLS.get(provider, "")
+        if url_key:
+            config[url_key] = value or ""
+            # Mirror to env so immediately-following fetches use it
             if value:
                 os.environ[url_key] = value
             elif url_key in os.environ:
@@ -442,6 +466,22 @@ _PROVIDER_BASE_URLS = {
     "ollama": "http://localhost:11434/v1",
     "llama": "http://localhost:11434/v1",
 }
+
+# DashScope stores a region name in DASHSCOPE_ENDPOINT; map it to the URL the
+# OpenAI-compatible client needs.  Kept here (rather than importing the ADK
+# provider module) so runtime stays cheap to import.
+_DASHSCOPE_ENDPOINTS = {
+    "china": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "singapore": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+    "international": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+}
+
+
+def _dashscope_url(config: Dict[str, Any]) -> str:
+    raw = str(config.get("DASHSCOPE_ENDPOINT") or "china")
+    if raw.startswith("http"):
+        return raw
+    return _DASHSCOPE_ENDPOINTS.get(raw.lower(), _DASHSCOPE_ENDPOINTS["china"])
 
 # Multi-official / regional / proxy / shim URLs for every provider.
 # Each entry: {"url": str, "label": str, "official": bool} — "official" means
@@ -604,23 +644,22 @@ def provider_base_url(provider: str, config: Optional[Dict[str, Any]] = None) ->
     compile-time defaults (needed for proxies, regional shims, etc).
     """
     provider = provider.lower()
-    cfg = get_llm_config(config)
+    raw = config if config is not None else load_config()
+    active = get_llm_config(raw)["provider"]
+    # Read the URL scoped to the requested provider.  Using the active flat
+    # alias here used to leak, e.g., a custom gateway URL into a DeepSeek
+    # model-list request while the active provider was custom.
+    if provider == active:
+        cfg = get_llm_config(raw)
+    else:
+        projected = dict(raw)
+        projected["provider"] = provider
+        cfg = get_llm_config(projected, provider_scoped=True)
     override = cfg.get("provider_url")
     if provider == "custom":
         return override or _PROVIDER_BASE_URLS.get("custom")
     if provider == "dashscope":
-        if override:
-            return override
-        region = (config or load_config()).get("DASHSCOPE_ENDPOINT", "china")
-        # For legacy DASHSCOPE_ENDPOINT env key, map region → preset row
-        dash_presets = _PROVIDER_URL_PRESETS.get("dashscope", [])
-        if region == "china" and dash_presets:
-            return dash_presets[0]["url"]
-        for row in dash_presets:
-            if region.lower() in row.get("label", "").lower():
-                return row["url"]
-        # Default fallback: first dashscope preset (China Hangzhou)
-        return dash_presets[0]["url"] if dash_presets else "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        return override or _dashscope_url(raw)
     # openai / deepseek / ollama / llama / unknown — explicit override wins
     return override or _PROVIDER_BASE_URLS.get(provider)
 
@@ -883,46 +922,39 @@ SKIP_DISCOVERED_SKILLS = {
 def _build_skill_manager():
     """Register the built-in skills, load external ones, and configure all."""
     from skills.manager import SkillManager
+    from skills.base import LazySkill
     from skills.builtins import TimeSkill, BrowserSkill, ThinkingToggleSkill
-    from skills.filesystem import FileSystemSkill
-    from skills.email import EmailSkill
-    from skills.system import SystemSkill
-    from skills.memory import MemorySkill
-    from skills.loader import SkillLoader
-    from skills.weather import WeatherSkill
-    from skills.bookmark import BookmarkSkill
-    from skills.news import NewsSkill
-    from skills.profile import ProfileSkill
-    from skills.git import GitSkill
-    from skills.date_calculator import DateCalculatorSkill
-    from skills.cache import CacheSkill
-    from skills.lunar_calendar import LunarCalendarSkill
-    from skills.menu import MenuSkill
-    from skills.survey import SurveySkill
-    from skills.diary import DiarySkill
-    from skills.web_search import WebSearchSkill
-    from skills.jira import JiraSkill
 
     manager = SkillManager()
-    for skill_cls in (
-        TimeSkill, BrowserSkill, ThinkingToggleSkill, WeatherSkill,
-        FileSystemSkill, EmailSkill, SystemSkill, MemorySkill, BookmarkSkill,
-        NewsSkill, ProfileSkill, GitSkill, DateCalculatorSkill, CacheSkill,
-        LunarCalendarSkill, MenuSkill, SurveySkill, DiarySkill,
-        WebSearchSkill, JiraSkill,
-    ):
+    for skill_cls in (TimeSkill, BrowserSkill, ThinkingToggleSkill):
         manager.register_skill(skill_cls())
 
-    # SkillLoader rediscovers every skill directory, including the ones just
-    # registered above, so it is deduplicated by name here. Without this each
-    # built-in skill lands in the manager twice and every one of its tools is
-    # declared twice to the model.
+    # Everything else is a LazySkill: only SKILL.md is read at startup.  The
+    # real module is imported when the router first selects the skill, so a
+    # turn that needs the clock does not pay for Jira, email or Chroma.
     known = {skill.name for skill in manager.skills} | SKIP_DISCOVERED_SKILLS
-    for skill in SkillLoader(skills_dir=REPO_ROOT / "skills").load_skills():
-        if skill.name in known:
+    skills_root = REPO_ROOT / "skills"
+
+    def register_lazy(path):
+        if not path.is_dir() or not (path / "SKILL.md").exists():
+            return
+        lazy = LazySkill(path)
+        if lazy.name in known:
+            return
+        known.add(lazy.name)
+        manager.register_skill(lazy)
+
+    for child in sorted(skills_root.iterdir()):
+        if not child.is_dir() or child.name.startswith("__"):
             continue
-        known.add(skill.name)
-        manager.register_skill(skill)
+        if child.name in ("builtins", "imported"):
+            continue
+        register_lazy(child)
+
+    imported_root = skills_root / "imported"
+    if imported_root.exists():
+        for child in sorted(imported_root.iterdir()):
+            register_lazy(child)
 
     manager.configure(load_config())
     return manager

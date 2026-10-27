@@ -24,6 +24,7 @@ All common tasks are driven through the **Makefile** (run `make help` to list th
 | `make console-start` | Build frontend and start the admin console on :5005 |
 | `make console-stop` | Stop the admin console |
 | `make console-status` | Check whether the admin console is running |
+| `make test` | Run the harness/router/config and provider round-trip tests |
 | `make lint` | Run isort + black + flake8 (max line length 120) |
 
 > The Makefile runs Python commands through **`uv`** (e.g. `cd core && uv run python cli.py`).
@@ -41,10 +42,13 @@ collig/
 ├── AGENT.md               # This file
 │
 ├── core/                  # Python backend
-│   ├── cli.py             # Interactive Rich CLI (entrypoint for 'make pa'); commands, config UI, completer
-│   ├── agent.py           # Legacy LangChain/LangGraph agent (class Agent + module-level singleton 'agent')
-│   ├── main.py            # FastAPI app (REST API + serves the built frontend at /admin)
-│   ├── runner.py          # ADK-based runner used by the newer agent stack
+│   ├── cli.py             # Interactive Rich CLI (entrypoint for 'make pa'); commands, completer, !shell
+│   ├── agent.py           # Legacy LangChain/LangGraph agent (kept for compatibility)
+│   ├── main.py            # FastAPI app (REST API + serves the built frontend)
+│   ├── runner.py          # ADK AgentService: the execution engine for CLI and web
+│   ├── harness.py         # Intent router, direct /<tool> calls, !shell runner
+│   ├── thinking.py        # Structured thinking/planning timeline for the CLI
+│   ├── config_ui.py       # Provider-scoped /config screen stack
 │   ├── runtime.py         # config.json helpers, provider/model resolution, DEFAULT_MODELS
 │   ├── paths.py           # Canonical paths (~/.collig for config/data/sessions) - 'paths' singleton
 │   ├── session.py         # SessionManager (chat history persistence)
@@ -78,18 +82,22 @@ collig/
 
 ---
 
-## Two agent stacks (important)
+## One harness, two surfaces
 
-There are **two** agent implementations sharing the same skills and sessions:
+`core/cli.py` (CLI) and `core/main.py` (FastAPI) both use
+`core.runner.get_agent()`, i.e. the ADK harness in `agents/collig/`:
 
-1. **Legacy LangChain/LangGraph** — `core/agent.py`. This is what `make pa`
-   (`core/cli.py`) uses via `from agent import agent`. `agent = Agent()` is a
-   module-level singleton created at import time.
-2. **Google ADK** — `agents/collig/` + `core/runner.py`. The newer stack used
-   by `adk web` / the FastAPI server.
+1. **Google ADK harness** — `agents/collig/` + `core/runner.py`. One long-lived
+   `App`/`Runner`; `SkillToolset` narrows the tools per turn; `TracePlugin`
+   records the trace; sub-agents own Jira/email/survey.
+2. **Legacy LangChain/LangGraph** — `core/agent.py`. Kept for compatibility and
+   migration; it is no longer on the `make pa` path. Do not add new features
+   there; port them to the ADK harness instead.
 
-Provider/model logic is duplicated across both (`core/agent.py` and
-`agents/collig/providers.py`). **When changing provider behaviour, update both.**
+Provider/model logic lives in `core/runtime.py` (resolution and storage) and
+`agents/collig/providers.py` (LiteLLM construction). Both surfaces read the
+same config, so update `core.runtime.set_llm_field` rather than writing
+`LLM_PROVIDER`/`LLM_MODEL` by hand.
 
 ---
 
@@ -112,10 +120,16 @@ environment variables / `core/.env`. Supported providers:
 - `provider list` — **list all providers and their available models**
   (also queries `ollama list` for locally installed models)
 - `provider <name> [model]` — switch provider (persists to config.json)
-- `config` — interactive configuration manager (set API keys, base URLs, etc.)
+- `config` — provider-scoped configuration UI. `Model Provider` opens one
+  provider's own page; `Esc` goes back one level, `q` quits.
 - `config set <KEY> <VALUE>` — set a single config value
+- `!<command>` — run a shell command (`!pwd`, `!git status`)
+- `/<tool> [args]` — call one tool directly with no model round-trip
 - `status` / `doctor` — check the LLM connection and system health
 - `stats` — token usage statistics
+
+Tests: `make test` runs `tests/test_harness.py` (router, lazy skills, config
+scoping, shell/direct tools) and `tests/test_llm_config_menu.py`.
 
 Example for a custom endpoint:
 
@@ -142,21 +156,29 @@ provider custom my-model-name
 
 - A skill is a directory with an `__init__.py` (subclass of `skills.base.Skill`)
   and a `SKILL.md` (YAML frontmatter + instructions).
-- **Built-in** skills are registered explicitly in
-  `Agent._register_initial_skills` (`core/agent.py`) as imported classes.
-- **External/imported** skills are auto-discovered from `skills/imported/`
-  by `Agent._load_external_skills`. Drop a new skill dir there and restart.
+- **Registration is lazy.** `core.runtime._build_skill_manager()` eagerly
+  imports only the tiny builtins (Time/Browser/Thinking Toggle). Every other
+  skill becomes a `skills.base.LazySkill`, which reads only SKILL.md until the
+  router first selects it.
+- `SKILL.md` frontmatter is the source of truth for routing and the Skills
+  page: put `name`, `description`, `triggers`, `tools` and
+  `config.required` there. The router also falls back to each skill's
+  `triggers` property.
+- **External/imported** skills are auto-discovered from `skills/imported/`.
+  Drop a new skill dir there and restart.
 - `SkillManager.register_skill` dedupes by skill name, so a skill is never
   registered (or its tools exposed) twice.
 
 ### Startup performance notes
 
-- Heavy vector-store deps (`langchain_chroma` → `chromadb`, ~0.6s) are imported
-  **lazily** in the memory/bookmark/profile/email/diary skills via a local
-  `_load_vectorstore_deps()` helper — only when those features are actually used.
-  Keep new skills lazy about heavy imports too.
-- `langchain_openai` (~2s) is imported eagerly by `core/agent.py` and is the
-  dominant, largely irreducible cost of the legacy stack's startup.
+- Never import a skill module or make a network call from `Skill.__init__` /
+  `configure()` unless it is genuinely cheap. `LazySkill` defers both until
+  the skill is selected. The Bookmarks skill used to call the embeddings API
+  during `configure()`; that is exactly the pattern to avoid.
+- `AgentService.tools` returns `ToolStub` objects (name/description only) so
+  the CLI completer and `/api/skills` never force the registry open.
+- ADK's `FunctionTool` needs a plain function. Wrap LangChain tools with
+  `skills.tooling.as_adk_function()` before passing them to ADK.
 
 ---
 

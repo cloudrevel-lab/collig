@@ -2,6 +2,39 @@
 name: jira
 description: Interact with Jira API to manage tasks, queries, and sprint work
 type: skill
+
+tools:
+  - name: list_sprint_tasks
+    description: List the current sprint board tasks assigned to you
+  - name: list_my_issues
+    description: List all open Jira issues assigned to you
+  - name: get_issue
+    description: Get details for a specific Jira issue by key (e.g. AIE-1234)
+  - name: list_board_issues
+    description: List all issues on a saved board by board id
+
+config:
+  required:
+    - JIRA_EMAIL
+    - JIRA_API_TOKEN
+
+triggers:
+  - jira
+  - sprint
+  - my plate
+  - on my plate
+  - ticket
+  - tickets
+  - issue
+  - issues
+  - task
+  - tasks
+  - story
+  - stories
+  - backlog
+  - scrum
+  - agile
+  - board
 ---
 
 ## Overview

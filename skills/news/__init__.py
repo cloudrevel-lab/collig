@@ -73,11 +73,14 @@ class NewsSkill(Skill):
                 NewsSkill._just_searched = True
                 NewsSkill._current_cache_id = None
 
-                # Save to news cache manager if available
+                # Every search is cached automatically.  Reopening it later
+                # should not require searching again.
+                cache_id = None
                 try:
                     from core.news_cache import get_news_cache_manager
                     cache_mgr = get_news_cache_manager()
-                    cache_mgr.save_search(query, results)
+                    cache_id = cache_mgr.save_search(query, results)
+                    NewsSkill._current_cache_id = cache_id
                 except Exception:
                     pass
 
@@ -89,7 +92,10 @@ class NewsSkill(Skill):
                     output.append(f"{i}. [{source}] {title} ({date})")
 
                 output.append("\nTo read a specific item, use 'read_news_item' with the item number.")
-                output.append("Tip: Use 'list_cached_news' to browse previous searches.")
+                if cache_id:
+                    output.append("📌 Saved to cache. Reopen it later with /news last (or /news cached to pick one).")
+                else:
+                    output.append("Tip: Use 'list_cached_news' to browse previous searches.")
                 return "\n".join(output)
 
             except Exception as e:
@@ -135,7 +141,8 @@ class NewsSkill(Skill):
                 from core.news_cache import get_news_cache_manager
                 cache_mgr = get_news_cache_manager()
                 cache_id = cache_mgr.save_search(NewsSkill._last_query, NewsSkill._news_cache)
-                return f"✅ Successfully saved news search! (ID: {cache_id})"
+                NewsSkill._current_cache_id = cache_id
+                return f"✅ Successfully saved news search! (ID: {cache_id})\n   Reopen it with /news last."
             except Exception as e:
                 return f"Error saving news search: {str(e)}"
 

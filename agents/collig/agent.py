@@ -12,8 +12,33 @@ conversation started in the CLI is replayable in the GUI.
 """
 import logging
 import os
+import warnings
 from datetime import datetime
 from typing import Optional
+
+# Expected, non-actionable warnings on every start: the App has transfers but
+# no provider-side explicit cache (none of the OpenAI-compatible providers
+# implement it), and ADK marks its JSON-schema function declarations as
+# experimental. Keep the CLI output about the user's work, not library noise.
+warnings.filterwarnings(
+    "ignore",
+    message='App "collig" can transfer between agents but has no context_cache_config.*',
+)
+warnings.filterwarnings(
+    "ignore",
+    message=".*FeatureName.JSON_SCHEMA_FOR_FUNC_DECL.*",
+)
+
+# ADK's Runner logs the same uncached-transfer warning through logging rather
+# than warnings, so a filter on the logger is needed as well.
+class _UncachedTransferFilter(logging.Filter):
+    def filter(self, record):
+        return "context_cache_config" not in record.getMessage()
+
+
+_uncached_filter = _UncachedTransferFilter()
+logging.getLogger("google.adk.runners").addFilter(_uncached_filter)
+logging.getLogger("google_adk.google.adk.runners").addFilter(_uncached_filter)
 
 from google.adk.agents import LlmAgent
 from google.adk.agents.readonly_context import ReadonlyContext

@@ -97,6 +97,10 @@ pa:
 list-sessions:
 	uv run python core/list_sessions.py
 
+test:
+	uv run python tests/test_harness.py
+	uv run python tests/test_llm_config_menu.py
+
 lint:
 	uv run isort --check-only --diff skills/lunar_calendar/__init__.py
 	uv run black --check --diff --line-length 120 skills/lunar_calendar/__init__.py

@@ -57,3 +57,24 @@ def tool_name(fn: Any) -> str:
 def tool_description(fn: Any) -> str:
     """Return a tool's description, tolerating undecorated callables."""
     return getattr(fn, "description", None) or inspect.getdoc(fn) or ""
+
+
+def as_adk_function(fn: Any):
+    """Return a plain, introspectable function for ADK (LangChain unwrap)."""
+    """Return a plain, introspectable function for ADK."""
+    inner = getattr(fn, "func", None) or getattr(fn, "coroutine", None)
+    if inner is None or not callable(inner):
+        return fn
+    name = getattr(fn, "name", None) or getattr(inner, "__name__", None)
+    description = getattr(fn, "description", None)
+    if name and getattr(inner, "__name__", None) != name:
+        try:
+            inner.__name__ = name
+        except (AttributeError, TypeError):
+            pass
+    if description and not getattr(inner, "description", None):
+        try:
+            inner.description = description
+        except (AttributeError, TypeError):
+            pass
+    return inner

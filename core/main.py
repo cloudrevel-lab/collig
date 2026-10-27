@@ -139,6 +139,7 @@ def _compute_session_token_stats(session_id: str) -> Optional[Dict[str, Any]]:
         "avg_tokens_per_turn": (total_toks // interaction_count) if interaction_count else 0,
     }
 
+
 # ---------------------------------------------------------------------------
 # Load config and configure skills
 # ---------------------------------------------------------------------------
@@ -182,11 +183,13 @@ async def _lifespan(app: FastAPI):
             # Ensure heavy imports are done even if the earlier module-level
             # eager-import in core.runner was swallowed by try/except.
             import core.runner  # noqa: F401
+
             get_agent()
         except BaseException as e:
             # Lifespan cannot fail the app boot on warmup; the first request
             # will surface the error with proper HTTP error semantics.
             import traceback as _tb
+
             print(f"[lifespan] agent warmup failed (OK, retry on first chat): {e}", flush=True)
             print(_tb.format_exc(), flush=True)
 
@@ -216,25 +219,34 @@ _app.add_middleware(
 # Helper: get skill instances
 # ---------------------------------------------------------------------------
 
-def _get_bookmark_skill():
+
+def _get_skill(name: str):
+    """Return the named skill, loading a LazySkill's module if needed.
+
+    The web data endpoints read skill-specific attributes such as
+    vectorstore. A LazySkill intentionally does not have those until its
+    module is imported, so the API would otherwise see None and return an
+    empty list even though Chroma has data on disk.
+    """
     for skill in get_skill_manager().skills:
-        if skill.name == "Bookmarks":
-            return skill
+        if skill.name == name:
+            try:
+                return skill.ensure_loaded()
+            except Exception:
+                return skill
     return None
+
+
+def _get_bookmark_skill():
+    return _get_skill("Bookmarks")
 
 
 def _get_memory_skill():
-    for skill in get_skill_manager().skills:
-        if skill.name == "Memory & Notes":
-            return skill
-    return None
+    return _get_skill("Memory & Notes")
 
 
 def _get_diary_skill():
-    for skill in get_skill_manager().skills:
-        if skill.name == "Diary":
-            return skill
-    return None
+    return _get_skill("Diary")
 
 
 def _get_all_bookmarks():
@@ -250,17 +262,19 @@ def _get_all_bookmarks():
         results = []
         for d, m, i in zip(docs, metas, ids):
             desc = ""
-            for line in d.split('\n'):
+            for line in d.split("\n"):
                 if line.startswith("Description:"):
                     desc = line.replace("Description:", "").strip()
                     break
-            results.append({
-                "id": i,
-                "url": m.get("url", ""),
-                "description": desc,
-                "tags": m.get("tags", ""),
-                "timestamp": m.get("timestamp", ""),
-            })
+            results.append(
+                {
+                    "id": i,
+                    "url": m.get("url", ""),
+                    "description": desc,
+                    "tags": m.get("tags", ""),
+                    "timestamp": m.get("timestamp", ""),
+                }
+            )
         results.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
         return results
     except Exception:
@@ -279,11 +293,13 @@ def _get_all_notes():
         ids = data.get("ids", [])
         results = []
         for d, m, i in zip(docs, metas, ids):
-            results.append({
-                "id": i,
-                "content": d,
-                "timestamp": m.get("timestamp", ""),
-            })
+            results.append(
+                {
+                    "id": i,
+                    "content": d,
+                    "timestamp": m.get("timestamp", ""),
+                }
+            )
         results.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
         return results
     except Exception:
@@ -302,11 +318,13 @@ def _get_all_diary_entries():
         ids = data.get("ids", [])
         results = []
         for d, m, i in zip(docs, metas, ids):
-            results.append({
-                "id": i,
-                "content": d,
-                "timestamp": m.get("timestamp", ""),
-            })
+            results.append(
+                {
+                    "id": i,
+                    "content": d,
+                    "timestamp": m.get("timestamp", ""),
+                }
+            )
         results.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
         return results
     except Exception:
@@ -317,6 +335,7 @@ def _get_all_diary_entries():
 # Root / Health
 # ---------------------------------------------------------------------------
 
+
 @_app.get("/health")
 def health_check():
     return {"status": "ok"}
@@ -325,6 +344,7 @@ def health_check():
 # ---------------------------------------------------------------------------
 # Chat
 # ---------------------------------------------------------------------------
+
 
 class _ChatRequestPydantic(BaseModel):
     message: str
@@ -356,6 +376,7 @@ def chat_endpoint(request: _ChatRequestPydantic):
         raise
     except Exception as e:
         import traceback
+
         traceback.print_exc()
         raise HTTPException(
             status_code=500,
@@ -377,6 +398,7 @@ def chat_endpoint(request: _ChatRequestPydantic):
 # ---------------------------------------------------------------------------
 # Sessions
 # ---------------------------------------------------------------------------
+
 
 @_app.get("/api/sessions")
 def list_sessions():
@@ -401,15 +423,21 @@ def list_sessions():
                         break
                 user_count = sum(1 for m in msgs if m.get("role") == "user")
                 ai_count = sum(1 for m in msgs if m.get("role") == "ai")
-                sessions.append({
-                    "id": data.get("id", fname.replace(".json", "")),
-                    "created_at": data.get("created_at", ""),
-                    "message_count": len(msgs),
-                    "user_messages": user_count,
-                    "ai_messages": ai_count,
-                    "preview": preview,
-                    "last_activity": msgs[-1].get("timestamp", data.get("created_at", "")) if msgs else data.get("created_at", ""),
-                })
+                sessions.append(
+                    {
+                        "id": data.get("id", fname.replace(".json", "")),
+                        "created_at": data.get("created_at", ""),
+                        "message_count": len(msgs),
+                        "user_messages": user_count,
+                        "ai_messages": ai_count,
+                        "preview": preview,
+                        "last_activity": (
+                            msgs[-1].get("timestamp", data.get("created_at", ""))
+                            if msgs
+                            else data.get("created_at", "")
+                        ),
+                    }
+                )
             except Exception:
                 continue
         sessions.sort(key=lambda x: x.get("last_activity", ""), reverse=True)
@@ -479,6 +507,7 @@ def delete_session(session_id: str):
 # ---------------------------------------------------------------------------
 # LLM Configuration
 # ---------------------------------------------------------------------------
+
 
 @_app.get("/api/config/llm")
 def get_llm_config_endpoint(provider: Optional[str] = None):
@@ -567,9 +596,7 @@ class _LlmConfigUpdate(BaseModel):
                     continue
                 key = ident
             else:
-                raise ValueError(
-                    f"available_models entries must be str or dict, got {type(item).__name__}"
-                )
+                raise ValueError(f"available_models entries must be str or dict, got {type(item).__name__}")
             if key in seen:
                 continue
             seen.add(key)
@@ -594,6 +621,22 @@ def update_llm_config_endpoint(update: _LlmConfigUpdate):
             continue
         set_llm_field(cfg, field, value)
         changed = True
+
+    # A provider switch must also move the flat aliases (provider_url /
+    # api_key / llm_model) to the new provider's values.  Otherwise an
+    # unchanged key from the previous provider leaks in -- e.g. the custom
+    # gateway key still being used after switching the dropdown to DeepSeek.
+    if update.provider and update.provider.lower() != (old_provider or "").lower():
+        projected = dict(cfg)
+        projected["provider"] = update.provider.lower()
+        scoped = get_llm_config(projected, provider_scoped=True)
+        if update.api_key is None:
+            set_llm_field(cfg, "api_key", scoped.get("api_key") or "")
+        if update.provider_url is None:
+            set_llm_field(cfg, "provider_url", scoped.get("provider_url") or "")
+        if update.llm_model is None:
+            set_llm_field(cfg, "llm_model", scoped.get("llm_model") or "")
+
     if changed:
         save_config(cfg)
     new_provider, new_model = get_provider_model(cfg)
@@ -644,6 +687,7 @@ def update_llm_config_endpoint(update: _LlmConfigUpdate):
             # runtime DB engine issue; but wrap for diagnostic)
             try:
                 from core.agent import get_agent as _legacy_agent_get
+
                 leg = _legacy_agent_get()
                 if leg is not None and hasattr(leg, "set_provider"):
                     leg.set_provider(new_provider, new_model)
@@ -743,12 +787,7 @@ def test_llm_connection_endpoint(req: _LlmTestRequest):
         bindings = _PROVIDER_KEY_BINDINGS.get(provider)
         k_key = bindings.get("api_key") if isinstance(bindings, dict) else None
         if k_key:
-            api_key = (
-                draft_cfg.get("api_key")
-                or draft_cfg.get(k_key)
-                or os.getenv(k_key)
-                or ""
-            )
+            api_key = draft_cfg.get("api_key") or draft_cfg.get(k_key) or os.getenv(k_key) or ""
         else:
             api_key = ""
         needs_key = k_key is not None
@@ -942,10 +981,12 @@ def test_llm_connection_endpoint(req: _LlmTestRequest):
 
 
 @_app.get("/api/config/models")
-def list_models_endpoint(provider: Optional[str] = Query(None),
-                         refresh: bool = Query(False),
-                         base_url: Optional[str] = Query(None),
-                         api_key: Optional[str] = Query(None)):
+def list_models_endpoint(
+    provider: Optional[str] = Query(None),
+    refresh: bool = Query(False),
+    base_url: Optional[str] = Query(None),
+    api_key: Optional[str] = Query(None),
+):
     """List available models for a provider (cached unless refresh=true).
 
     The Settings page sets ``base_url`` / ``api_key`` (optional) when the user has
@@ -984,6 +1025,7 @@ def list_models_endpoint(provider: Optional[str] = Query(None),
 # Full Config (raw config.json access)
 # ---------------------------------------------------------------------------
 
+
 @_app.get("/api/config")
 def get_full_config():
     """Return the raw ~/.collig/config.json contents."""
@@ -1007,6 +1049,7 @@ def update_full_config(values: Dict[str, Any]):
 # Skills
 # ---------------------------------------------------------------------------
 
+
 @_app.get("/api/skills")
 def list_skills():
     """List all registered skills with enable/disable status and tool counts."""
@@ -1014,16 +1057,20 @@ def list_skills():
     result = []
     for skill in sm.skills:
         try:
-            tools = skill.get_tools() if skill.enabled else []
+            # tool_metadata() is cheap for LazySkill and does not import the
+            # module.  The Settings page only needs names/counts.
+            metadata = skill.tool_metadata()
         except Exception:
-            tools = []
-        result.append({
-            "name": skill.name,
-            "enabled": skill.enabled,
-            "description": getattr(skill, "description", "") or "",
-            "tool_count": len(tools),
-            "tool_names": [getattr(t, "name", str(t)) for t in tools],
-        })
+            metadata = []
+        result.append(
+            {
+                "name": skill.name,
+                "enabled": skill.enabled,
+                "description": getattr(skill, "description", "") or "",
+                "tool_count": len(metadata),
+                "tool_names": [item.get("name", "") for item in metadata],
+            }
+        )
     # Return both formats: flat list (for ConfigView) and wrapped (for anyone else)
     return result
 
@@ -1041,16 +1088,20 @@ def toggle_skill(toggle: _SkillToggle):
         if skill.name == toggle.skill_name:
             skill.enabled = toggle.enabled
             cfg = load_config()
-            # Save skill enable state in config if the skill uses it
+            cfg[f"SKILL_{skill.name.upper().replace(' ', '_')}_ENABLED"] = toggle.enabled
             save_config(cfg)
-            return {"message": f"Skill '{toggle.skill_name}' {'enabled' if toggle.enabled else 'disabled'}",
-                    "name": toggle.skill_name, "enabled": toggle.enabled}
+            return {
+                "message": f"Skill '{toggle.skill_name}' {'enabled' if toggle.enabled else 'disabled'}",
+                "name": toggle.skill_name,
+                "enabled": toggle.enabled,
+            }
     raise HTTPException(status_code=404, detail=f"Skill '{toggle.skill_name}' not found")
 
 
 # ---------------------------------------------------------------------------
 # Token Statistics
 # ---------------------------------------------------------------------------
+
 
 @_app.get("/api/stats/tokens")
 def overall_token_stats():
@@ -1094,6 +1145,7 @@ def session_token_stats(session_id: str):
 # Traces (LLM calls + Tool calls)
 # ---------------------------------------------------------------------------
 
+
 @_app.get("/api/traces/{session_id}")
 def get_session_traces(session_id: str):
     """Get all invocation traces for a session (summaries + full data)."""
@@ -1120,6 +1172,7 @@ def get_invocation_trace(session_id: str, invocation_id: str):
 # ---------------------------------------------------------------------------
 # Bookmarks API
 # ---------------------------------------------------------------------------
+
 
 class _BookmarkCreate(BaseModel):
     url: str
@@ -1149,11 +1202,12 @@ def create_bookmark(bm: _BookmarkCreate):
         raise HTTPException(status_code=503, detail="Bookmark system not initialized. Check OPENAI_API_KEY.")
     try:
         from langchain_core.documents import Document
+
         meta = {
             "url": bm.url,
             "timestamp": datetime.datetime.now().isoformat(),
             "tags": bm.tags,
-            "type": "user_bookmark"
+            "type": "user_bookmark",
         }
         search_content = f"URL: {bm.url}\nDescription: {bm.description}\nTags: {bm.tags}"
         skill.vectorstore.add_documents([Document(page_content=search_content, metadata=meta)])
@@ -1188,7 +1242,7 @@ def update_bookmark(bookmark_id: str, bm: _BookmarkUpdate):
         new_url = bm.url if bm.url is not None else old_meta.get("url", "")
         new_tags = bm.tags if bm.tags is not None else old_meta.get("tags", "")
         old_desc = ""
-        for line in old_content.split('\n'):
+        for line in old_content.split("\n"):
             if line.startswith("Description:"):
                 old_desc = line.replace("Description:", "").strip()
                 break
@@ -1197,14 +1251,10 @@ def update_bookmark(bookmark_id: str, bm: _BookmarkUpdate):
             "url": new_url,
             "timestamp": old_meta.get("timestamp", datetime.datetime.now().isoformat()),
             "tags": new_tags,
-            "type": "user_bookmark"
+            "type": "user_bookmark",
         }
         search_content = f"URL: {new_url}\nDescription: {new_desc}\nTags: {new_tags}"
-        skill.vectorstore._collection.update(
-            ids=[bookmark_id],
-            documents=[search_content],
-            metadatas=[new_meta]
-        )
+        skill.vectorstore._collection.update(ids=[bookmark_id], documents=[search_content], metadatas=[new_meta])
         return {"message": "Bookmark updated"}
     except HTTPException:
         raise
@@ -1215,6 +1265,7 @@ def update_bookmark(bookmark_id: str, bm: _BookmarkUpdate):
 # ---------------------------------------------------------------------------
 # Notes API
 # ---------------------------------------------------------------------------
+
 
 class _NoteCreate(BaseModel):
     content: str
@@ -1240,6 +1291,7 @@ def create_note(note: _NoteCreate):
         raise HTTPException(status_code=503, detail="Memory system not initialized. Check OPENAI_API_KEY.")
     try:
         from langchain_core.documents import Document
+
         meta = {"timestamp": datetime.datetime.now().isoformat(), "type": "user_note"}
         skill.vectorstore.add_documents([Document(page_content=note.content, metadata=meta)])
         return {"message": "Note created"}
@@ -1270,15 +1322,8 @@ def update_note(note_id: str, note: _NoteUpdate):
             raise HTTPException(status_code=404, detail="Note not found")
         old_meta = existing["metadatas"][0]
         new_content = note.content if note.content is not None else existing["documents"][0]
-        new_meta = {
-            "timestamp": old_meta.get("timestamp", datetime.datetime.now().isoformat()),
-            "type": "user_note"
-        }
-        skill.vectorstore._collection.update(
-            ids=[note_id],
-            documents=[new_content],
-            metadatas=[new_meta]
-        )
+        new_meta = {"timestamp": old_meta.get("timestamp", datetime.datetime.now().isoformat()), "type": "user_note"}
+        skill.vectorstore._collection.update(ids=[note_id], documents=[new_content], metadatas=[new_meta])
         return {"message": "Note updated"}
     except HTTPException:
         raise
@@ -1289,6 +1334,7 @@ def update_note(note_id: str, note: _NoteUpdate):
 # ---------------------------------------------------------------------------
 # Diary API
 # ---------------------------------------------------------------------------
+
 
 class _DiaryEntryCreate(BaseModel):
     content: str
@@ -1314,6 +1360,7 @@ def create_diary_entry(entry: _DiaryEntryCreate):
         raise HTTPException(status_code=503, detail="Diary system not initialized. Check OPENAI_API_KEY.")
     try:
         from langchain_core.documents import Document
+
         meta = {"timestamp": datetime.datetime.now().isoformat(), "type": "diary_entry"}
         skill.vectorstore.add_documents([Document(page_content=entry.content, metadata=meta)])
         return {"message": "Diary entry created"}
@@ -1344,15 +1391,8 @@ def update_diary_entry(entry_id: str, entry: _DiaryEntryUpdate):
             raise HTTPException(status_code=404, detail="Diary entry not found")
         old_meta = existing["metadatas"][0]
         new_content = entry.content if entry.content is not None else existing["documents"][0]
-        new_meta = {
-            "timestamp": old_meta.get("timestamp", datetime.datetime.now().isoformat()),
-            "type": "diary_entry"
-        }
-        skill.vectorstore._collection.update(
-            ids=[entry_id],
-            documents=[new_content],
-            metadatas=[new_meta]
-        )
+        new_meta = {"timestamp": old_meta.get("timestamp", datetime.datetime.now().isoformat()), "type": "diary_entry"}
+        skill.vectorstore._collection.update(ids=[entry_id], documents=[new_content], metadatas=[new_meta])
         return {"message": "Diary entry updated"}
     except HTTPException:
         raise
@@ -1375,6 +1415,3 @@ if os.path.exists(FRONTEND_DIST):
         if path.startswith("api/") or path.startswith("assets/"):
             raise HTTPException(status_code=404, detail="Not found")
         return FileResponse(os.path.join(FRONTEND_DIST, "index.html"))
-
-
-

@@ -15,7 +15,6 @@ config:
 
 triggers:
   - date
-  - time
   - calendar
   - when is
   - next monday

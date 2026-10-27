@@ -248,51 +248,40 @@ class TracePlugin(BasePlugin):
     # Tool calls
     # ------------------------------------------------------------------
 
-    async def before_tool_callback(self, *, callback_context: CallbackContext,
-                                   tool_call: Any) -> None:
-        invocation_id = callback_context.invocation_id
-        session_id = self._inv_session.get(invocation_id)
+    async def before_tool_callback(self, *, tool: Any, tool_args: Dict[str, Any],
+                                   tool_context: Any) -> None:
+        invocation_id = tool_context.invocation_id
+        session_id = self._inv_session.get(invocation_id) or tool_context.session.id
         if session_id is None:
             return None
 
         try:
-            name = getattr(tool_call, "name", "") or ""
-            args = getattr(tool_call, "args", None) or {}
-            call_id = getattr(tool_call, "id", None) or f"{name}-{id(tool_call)}"
+            name = getattr(tool, "name", "") or ""
+            args = dict(tool_args or {})
+            call_id = getattr(tool_context, "function_call_id", None) or f"{name}-{id(tool)}"
             idx = get_trace_manager().start_tool_call(
-                session_id, invocation_id, name=name, args=dict(args),
+                session_id, invocation_id, name=name, args=args,
             )
             self._pending_tools.setdefault(invocation_id, {})[call_id] = (idx, session_id)
         except Exception as e:
             logger.warning("Trace: failed to start tool call: %s", e)
         return None
 
-    async def after_tool_callback(self, *, callback_context: CallbackContext,
-                                  tool_call: Any, tool_response: Any) -> None:
-        invocation_id = callback_context.invocation_id
-        call_id = getattr(tool_call, "id", None) or f"{getattr(tool_call, 'name', '')}-{id(tool_call)}"
+    async def after_tool_callback(self, *, tool: Any, tool_args: Dict[str, Any],
+                                  tool_context: Any, result: Any) -> None:
+        invocation_id = tool_context.invocation_id
+        name = getattr(tool, "name", "") or ""
+        call_id = getattr(tool_context, "function_call_id", None) or f"{name}-{id(tool)}"
         pending = self._pending_tools.get(invocation_id) or {}
         entry = pending.pop(call_id, None)
         if entry is None:
             return None
         idx, session_id = entry
 
-        result_val = None
-        error = None
-        try:
-            resp = getattr(tool_response, "response", None)
-            if resp is not None and resp.parts:
-                text_parts = [p.text for p in resp.parts if getattr(p, "text", None)]
-                result_val = "\n".join(text_parts) if text_parts else None
-            if result_val is None:
-                result_val = tool_response
-        except Exception as e:
-            error = f"[Unable to serialize tool result: {e}]"
-
         try:
             get_trace_manager().finish_tool_call(
                 session_id, invocation_id, idx,
-                result=result_val, error=error,
+                result=result, error=None,
             )
         except Exception as e:
             logger.warning("Trace: failed to finish tool call: %s", e)

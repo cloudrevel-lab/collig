@@ -96,9 +96,6 @@ class SkillManager:
         for existing in self.skills:
             if existing.name == skill.name:
                 return
-        import sys
-        sys.stdout.write(f"\r\033[KRegistering skill: {skill.name}")
-        sys.stdout.flush()
         self.skills.append(skill)
 
     def get_tools(self) -> List[Any]:
@@ -117,39 +114,38 @@ class SkillManager:
     def find_skill(self, message: str) -> Optional[Skill]:
         """
         Finds a skill that matches the user's message.
-        
-        Prioritizes LLM-based intent recognition if available,
-        falls back to keyword matching.
-        
+
+        This used to make an extra gpt-3.5-turbo call with every skill
+        description in the prompt.  The harness router does the same job
+        locally (exact tool names, triggers and curated keywords) with no
+        model call and no provider dependency.
+
         Args:
             message: User message to analyze
-            
+
         Returns:
             Matching skill or None
         """
-        if self.client:
-            try:
-                skill = self._find_skill_llm(message)
-                if skill:
-                    return skill
-            except Exception as e:
-                print(f"LLM intent detection failed: {e}. Falling back to keywords.")
+        try:
+            from core.harness import route_message
+            route = route_message(message, manager=self)
+            if route.skills:
+                return route.skills[0]
+            return None
+        except Exception:
+            pass
 
-        # Fallback to simple keyword matching
+        # Conservative fallback if the harness is unavailable (e.g. a skill
+        # manager used outside Collig in a unit test).
         message = message.lower()
         for skill in self.skills:
             if not skill.enabled:
                 continue
-            
-            # Check triggers
             for trigger in skill.triggers:
                 if trigger in message:
                     return skill
-            
-            # Also check skill name and description
             if skill.name.lower() in message or skill.description.lower() in message:
                 return skill
-        
         return None
 
     def _find_skill_llm(self, message: str) -> Optional[Skill]:
@@ -240,13 +236,7 @@ class SkillManager:
                 "description": skill.description,
                 "enabled": skill.enabled,
                 "triggers": skill.triggers,
-                "tools": [
-                    {
-                        "name": tool.name if hasattr(tool, "name") else tool.__name__,
-                        "description": tool.description if hasattr(tool, "description") else tool.__doc__,
-                    }
-                    for tool in skill.get_tools()
-                ]
+                "tools": skill.tool_metadata()
             }
             for skill in self.skills
         ]

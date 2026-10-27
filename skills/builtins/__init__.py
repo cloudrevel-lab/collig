@@ -3,10 +3,10 @@ Built-in Skills - Core skills required by the agent.
 
 Provides TimeSkill, BrowserSkill, and ThinkingToggleSkill.
 """
-from typing import List
+from typing import Any, List
 import datetime
 import webbrowser
-from langchain_core.tools import tool, BaseTool
+from skills.tooling import tool
 from skills.base import Skill
 
 
@@ -38,7 +38,7 @@ class TimeSkill(Skill):
     def triggers(self) -> List[str]:
         return ["time", "date", "current time", "what time", "today"]
 
-    def get_tools(self) -> List[BaseTool]:
+    def get_tools(self) -> List[Any]:
 
         @tool
         def get_current_time() -> str:
@@ -69,7 +69,7 @@ class BrowserSkill(Skill):
     def triggers(self) -> List[str]:
         return ["open url", "open link", "browse", "website"]
 
-    def get_tools(self) -> List[BaseTool]:
+    def get_tools(self) -> List[Any]:
 
         @tool
         def open_url(url: str) -> str:
@@ -106,7 +106,7 @@ class ThinkingToggleSkill(Skill):
     def triggers(self) -> List[str]:
         return ["toggle thinking", "verbose mode", "quiet mode", "thinking"]
 
-    def get_tools(self) -> List[BaseTool]:
+    def get_tools(self) -> List[Any]:
 
         @tool
         def toggle_thinking(enable: bool = None) -> str:

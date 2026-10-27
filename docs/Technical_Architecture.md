@@ -1,5 +1,11 @@
 # Technical Architecture Document (TAD) - Collig
 
+> Status note (2026-10-27): the current implementation is documented in
+> [INVESTIGATION.md](INVESTIGATION.md). The CLI and web console now share the
+> Google ADK harness in `core/runner.py`; the LangChain path in
+> `core/agent.py` is legacy. This document's original marketplace sections
+> describe an earlier design and are retained for context.
+
 ## 1. System Architecture
 The system consists of a Frontend (UI), a Backend (AI Core & API), and a Database (Marketplace Data).
 
@@ -23,7 +29,7 @@ graph TD
 - **Styling**: Tailwind CSS (recommended) or scoped CSS
 
 ### 2.2. Backend
-- **Language**: Python 3.10+
+- **Language**: Python 3.13+
 - **Framework**: FastAPI
 - **AI/LLM Integration**: LangChain or direct API calls (OpenAI/Anthropic)
 - **OS Interaction**: `subprocess`, `os`, `pyautogui` (for UI automation)

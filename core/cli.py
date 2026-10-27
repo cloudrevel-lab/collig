@@ -36,6 +36,19 @@ class SkillCommandCompleter(Completer):
     def get_completions(self, document: Document, complete_event):
         text = document.text_before_cursor
 
+        # Shell mode: suggest a few common commands.
+        if text.startswith("!"):
+            for cmd, desc in (
+                ("!pwd", "Print working directory"),
+                ("!ls", "List files"),
+                ("!git status", "Git status"),
+                ("!git diff", "Git diff"),
+            ):
+                if cmd.startswith(text):
+                    yield Completion(cmd, start_position=-len(text),
+                                     display=cmd, display_meta=desc)
+            return
+
         # Only trigger if it starts with /
         if not text.startswith("/"):
             return
@@ -55,10 +68,14 @@ class SkillCommandCompleter(Completer):
             ("provider list", "List all providers and their default models"),
             ("provider models", "Fetch live models from the current endpoint and pick one"),
             ("news", "Open interactive news browser (if news was searched)"),
+            ("news last", "Reopen the most recent cached search"),
+            ("news load", "Load a cached search by number or cache id"),
+            ("news save", "Save the current search to cache explicitly"),
             ("news cached", "Browse saved news searches"),
             ("news history", "Browse saved news searches"),
             ("news saved", "Browse saved news searches"),
             ("news list", "Browse saved news searches"),
+            ("news ls", "Plain-text list of saved searches"),
             ("status", "Check system status and LLM connection"),
             ("stats", "Show token usage statistics (session + overall)"),
             ("stats session", "Show token usage for current session"),
@@ -77,6 +94,8 @@ class SkillCommandCompleter(Completer):
             ("console stop", "Stop Collig web"),
             ("console restart", "Restart Collig web"),
             ("console open", "Open the console in your browser"),
+            ("!<command>", "Run a shell command directly, e.g. !pwd or !git status"),
+            ("/<tool>", "Call a tool directly, e.g. /get_current_time (no model call)"),
             ("jira", "Jira management - list sprint tasks, issues, or get issue details"),
             ("jira sprint", "List your sprint board tasks"),
             ("jira issues", "List all your open issues"),
@@ -433,6 +452,18 @@ def handle_news_action(action_result: dict, agent):
                 console.print(f"[green]Opening: {url}[/green]")
             except Exception as e:
                 console.print(f"[red]Failed to open browser: {e}[/red]")
+
+
+def browse_news_items(news_items, query, agent):
+    """Open the interactive browser for a list of news items."""
+    if not news_items:
+        console.print("[yellow]No news items to browse.[/yellow]")
+        return
+    while True:
+        news_action = interactive_news_menu(news_items, query)
+        if not news_action:
+            break
+        handle_news_action(news_action, agent)
 
 
 def load_config():
@@ -932,546 +963,9 @@ def get_config_schema(agent=None):
 
 
 def interactive_config_ui(agent=None):
-    """
-    Interactive configuration UI with arrow key navigation and tabs.
-    Use Tab/Shift+Tab to switch tabs, ↑/↓ to navigate, ←/→ to toggle, Enter to edit.
-    """
-    from prompt_toolkit import Application
-    from prompt_toolkit.layout import Layout, HSplit, Window, WindowAlign
-    from prompt_toolkit.layout.controls import FormattedTextControl
-    from prompt_toolkit.layout.dimension import Dimension
-    from prompt_toolkit.key_binding import KeyBindings
-
-    config = load_config()
-    schema = get_config_schema(agent)
-
-    # Initialize config with defaults if missing
-    for item in schema:
-        if item["key"] not in config:
-            config[item["key"]] = item["default"]
-
-    # Make sure the new unified flat aliases (provider, llm_model, provider_url,
-    # api_key, available_models) are mirrored into legacy storage keys so the
-    # unchanged closures (config[item["key"]]) always read/write the correct
-    # stored values.  Writes go the opposite way via save_config hook below.
-    from core.runtime import set_llm_field
-    for field, legacy_key in (
-        ("provider", "LLM_PROVIDER"),
-        ("llm_model", "LLM_MODEL"),
-    ):
-        if config.get(field) and not config.get(legacy_key):
-            config[legacy_key] = config[field]
-    # available_models -> legacy AVAILABLE_MODELS
-    if isinstance(config.get("available_models"), list) and not isinstance(config.get("AVAILABLE_MODELS"), list):
-        config["AVAILABLE_MODELS"] = list(config["available_models"])
-
-    # Store original config with defaults for comparison
-    original_config = config.copy()
-
-    # Tab state
-    current_tab = 0  # 0 = Settings, 1 = Skills
-    tabs = ["Settings", "Skills"]
-
-    # Settings tab state
-    settings_selected_index = 0
-
-    # Skills tab state
-    skills_selected_index = 0
-    skills = []
-    if agent:
-        skills = agent.skill_manager.skills
-
-    # Load skill enabled states from config
-    skill_enabled = {}
-    for skill in skills:
-        config_key = f"SKILL_{skill.name.upper().replace(' ', '_')}_ENABLED"
-        if config_key in config:
-            skill.enabled = config[config_key]
-        skill_enabled[skill.name] = skill.enabled
-
-    def get_display_value(item):
-        """Get formatted value for display."""
-        if item["type"] == "info":
-            # info rows are read-only summary rows (e.g. cached available_models count)
-            if item["key"] == "AVAILABLE_MODELS":
-                raw = (
-                    config.get("available_models")
-                    or config.get("AVAILABLE_MODELS")
-                    or []
-                )
-                if isinstance(raw, list) and raw:
-                    return "%d cached · press [m] to refresh" % len(raw)
-                return "(no cached list — press [m] to fetch)"
-            # Generic info: render description as value
-            return ""
-        value = config.get(item["key"], item["default"])
-        if item["type"] == "boolean":
-            return "ON" if value else "OFF"
-        elif item["type"] == "secret" and value:
-            return "*" * 8
-        elif item["type"] == "choice":
-            return str(value)
-        else:
-            return str(value) if value else "(not set)"
-
-    def get_tabs_text():
-        """Build the tab bar text."""
-        result = []
-        for i, tab_name in enumerate(tabs):
-            if i == current_tab:
-                result.append(("bold reverse", f" {tab_name} "))
-            else:
-                result.append(("", f" {tab_name} "))
-            if i < len(tabs) - 1:
-                result.append(("", "  "))
-        return to_formatted_text(result)
-
-    def get_settings_text():
-        """Build the formatted text for the settings tab."""
-        result = []
-        result.append(("bold", "Collig Configuration Manager\n\n"))
-
-        # Group by category
-        categories = {}
-        for item in schema:
-            cat = item["category"]
-            if cat not in categories:
-                categories[cat] = []
-            categories[cat].append(item)
-
-        # Build the list with categories
-        current_index = 0
-        first_category = True
-        for cat, items in categories.items():
-            # Add separator between categories (except before first)
-            if not first_category:
-                result.append(("dim", "  " + "─" * 50 + "\n"))
-            first_category = False
-
-            result.append(("bold cyan", f"  {cat}\n"))
-            for item in items:
-                prefix = "> " if current_index == settings_selected_index else "  "
-                value = get_display_value(item)
-                label = item.get("label", item["key"])
-
-                if current_index == settings_selected_index:
-                    result.append(("bold cyan", f"{prefix}{label}: "))
-                    result.append(("bold reverse", f" {value} "))
-                    result.append(("", f"  {item['description']}\n"))
-                else:
-                    result.append(("", f"{prefix}{label}: {value}  {item['description']}\n"))
-                current_index += 1
-
-        return to_formatted_text(result)
-
-    def get_skills_text():
-        """Build the formatted text for the skills tab."""
-        result = []
-        result.append(("bold", "Skill Management\n\n"))
-
-        if not skills:
-            result.append(("dim", "  No skills available.\n"))
-        else:
-            for i, skill in enumerate(skills):
-                prefix = "> " if i == skills_selected_index else "  "
-                enabled = skill_enabled.get(skill.name, True)
-                status = "[X]" if enabled else "[ ]"
-
-                if i == skills_selected_index:
-                    result.append(("bold cyan", f"{prefix}"))
-                    result.append(("bold reverse", f" {status} "))
-                    result.append(("", f" {skill.name}\n"))
-                    result.append(("dim", f"      {skill.description}\n"))
-                else:
-                    result.append(("", f"{prefix}{status} {skill.name}\n"))
-
-        return to_formatted_text(result)
-
-    def get_footer_text():
-        """Get the footer help text."""
-        if current_tab == 0:
-            return to_formatted_text([("dim", "[Tab] Tabs  [↑/↓] Nav  [←/→] Toggle  [Enter] Edit  [m] Fetch models  [s] Save  [q] Quit")])
-        else:
-            return to_formatted_text([("dim", "[Tab] Switch Tabs  [↑/↓] Navigate  [←/→/Space] Toggle  [s] Save  [q] Quit")])
-
-    def get_content_text():
-        """Get the main content text based on current tab."""
-        if current_tab == 0:
-            return get_settings_text()
-        else:
-            return get_skills_text()
-
-    def save_config_and_update():
-        """Save config and update environment variables."""
-        # Save skill enabled states - use agent's skill manager directly
-        skill_changes = []
-        if agent is not None:
-            for skill in agent.skill_manager.skills:
-                config_key = f"SKILL_{skill.name.upper().replace(' ', '_')}_ENABLED"
-                new_state = skill_enabled.get(skill.name, True)
-                old_state = config.get(config_key, True)
-                if old_state != new_state:
-                    skill_changes.append(f"{skill.name}: {'enabled' if new_state else 'disabled'}")
-                config[config_key] = new_state
-                skill.enabled = new_state
-
-        # Mirror any legacy key edits into new unified flat aliases so reads
-        # via get_llm_config() (which prefers the new names) always reflect
-        # the user's edits.  This keeps both storage forms in sync on save.
-        from core.runtime import set_llm_field
-        for legacy, field in (
-            ("LLM_PROVIDER", "provider"),
-            ("LLM_MODEL", "llm_model"),
-            ("CUSTOM_BASE_URL", "provider_url"),
-            ("DASHSCOPE_ENDPOINT", "provider_url"),
-            ("OPENAI_API_KEY", "api_key"),
-            ("DEEPSEEK_API_KEY", "api_key"),
-            ("DASHSCOPE_API_KEY", "api_key"),
-            ("CUSTOM_API_KEY", "api_key"),
-            ("AVAILABLE_MODELS", "available_models"),
-        ):
-            if legacy in config and config.get(legacy) is not None:
-                set_llm_field(config, field, config.get(legacy))
-        # If user has new unified alias for available_models that was set by
-        # cache_available_models but AVAILABLE_MODELS not set, also sync legacy
-        if isinstance(config.get("available_models"), list):
-            set_llm_field(config, "available_models", config["available_models"])
-
-        save_config(config)
-
-        # Update environment variables for API keys
-        for item in schema:
-            if item["type"] == "secret" and item["key"] in config:
-                os.environ[item["key"]] = config[item["key"]]
-                if item["key"].endswith("_API_KEY"):
-                    env_file = ".env"
-                    if os.path.exists(env_file):
-                        set_key(env_file, item["key"], config[item["key"]])
-
-        # Update agent with new provider/model if changed
-        if agent is not None:
-            new_provider = config.get("LLM_PROVIDER")
-            new_model = config.get("LLM_MODEL")
-            if new_provider and (new_provider != original_config.get("LLM_PROVIDER") or new_model != original_config.get("LLM_MODEL")):
-                agent.set_provider(new_provider, new_model)
-
-            # Reinitialize agent with updated enabled skills
-            agent._init_langchain_agent()
-
-            # Show what changed
-            if skill_changes:
-                console.print("[dim]  Skills updated:[/dim]")
-                for change in skill_changes:
-                    console.print(f"[dim]    - {change}[/dim]")
-                console.print(f"[dim]  Loaded {len(agent.tools)} tools[/dim]")
-
-        return True
-
-    def has_changes():
-        """Check if there are unsaved changes."""
-        current_config = load_config()
-
-        # Check settings changes
-        for key in config:
-            if current_config.get(key) != config.get(key):
-                return True
-
-        # Check skill changes
-        for skill in skills:
-            config_key = f"SKILL_{skill.name.upper().replace(' ', '_')}_ENABLED"
-            if current_config.get(config_key, True) != skill_enabled.get(skill.name, True):
-                return True
-
-        return False
-
-    kb = KeyBindings()
-
-    @kb.add("tab")
-    def next_tab(event):
-        nonlocal current_tab
-        current_tab = (current_tab + 1) % len(tabs)
-        tabs_control.text = get_tabs_text()
-        content_control.text = get_content_text()
-        footer_control.text = get_footer_text()
-
-    @kb.add("s-tab")
-    def prev_tab(event):
-        nonlocal current_tab
-        current_tab = (current_tab - 1) % len(tabs)
-        tabs_control.text = get_tabs_text()
-        content_control.text = get_content_text()
-        footer_control.text = get_footer_text()
-
-    @kb.add("up")
-    def move_up(event):
-        nonlocal settings_selected_index, skills_selected_index
-        if current_tab == 0:
-            settings_selected_index = (settings_selected_index - 1) % len(schema)
-        else:
-            if skills:
-                skills_selected_index = (skills_selected_index - 1) % len(skills)
-        content_control.text = get_content_text()
-
-    @kb.add("down")
-    def move_down(event):
-        nonlocal settings_selected_index, skills_selected_index
-        if current_tab == 0:
-            settings_selected_index = (settings_selected_index + 1) % len(schema)
-        else:
-            if skills:
-                skills_selected_index = (skills_selected_index + 1) % len(skills)
-        content_control.text = get_content_text()
-
-    @kb.add("left")
-    def toggle_left(event):
-        """Toggle boolean or cycle choice left."""
-        if current_tab == 0:
-            item = schema[settings_selected_index]
-            if item["type"] == "boolean":
-                config[item["key"]] = not config.get(item["key"], item["default"])
-            elif item["type"] == "choice":
-                current = config.get(item["key"], item["default"])
-                options = item["options"]
-                try:
-                    idx = options.index(current)
-                    new_idx = (idx - 1) % len(options)
-                    config[item["key"]] = options[new_idx]
-                except ValueError:
-                    config[item["key"]] = options[0]
-        else:
-            if skills:
-                skill = skills[skills_selected_index]
-                skill_enabled[skill.name] = not skill_enabled.get(skill.name, True)
-        content_control.text = get_content_text()
-
-    @kb.add("right")
-    def toggle_right(event):
-        """Toggle boolean or cycle choice right."""
-        if current_tab == 0:
-            item = schema[settings_selected_index]
-            if item["type"] == "boolean":
-                config[item["key"]] = not config.get(item["key"], item["default"])
-            elif item["type"] == "choice":
-                current = config.get(item["key"], item["default"])
-                options = item["options"]
-                try:
-                    idx = options.index(current)
-                    new_idx = (idx + 1) % len(options)
-                    config[item["key"]] = options[new_idx]
-                except ValueError:
-                    config[item["key"]] = options[0]
-        else:
-            if skills:
-                skill = skills[skills_selected_index]
-                skill_enabled[skill.name] = not skill_enabled.get(skill.name, True)
-        content_control.text = get_content_text()
-
-    @kb.add("space")
-    def toggle_space(event):
-        """Toggle with space bar (skills tab only)."""
-        if current_tab == 1 and skills:
-            skill = skills[skills_selected_index]
-            skill_enabled[skill.name] = not skill_enabled.get(skill.name, True)
-            content_control.text = get_content_text()
-
-    @kb.add("enter")
-    def edit_value(event):
-        """Edit a string/secret value by typing (only in settings tab)."""
-        if current_tab == 0:
-            item = schema[settings_selected_index]
-            if item["type"] in ["string", "secret"]:
-                # Exit the main app to show input dialog
-                event.app.exit(result=("edit", item))
-
-    @kb.add("m")
-    def fetch_models_key(event):
-        """Fetch available models from the current provider and pick one."""
-        if current_tab == 0:
-            event.app.exit(result=("fetch_models",))
-
-    @kb.add("s")
-    def save(event):
-        """Save configuration."""
-        save_config_and_update()
-        event.app.exit(result=("saved",))
-
-    @kb.add("q")
-    @kb.add("escape")
-    @kb.add("c-c")
-    def quit(event):
-        """Quit without saving (prompt if changes)."""
-        if has_changes():
-            event.app.exit(result=("confirm_quit",))
-        else:
-            event.app.exit(result=("quit",))
-
-    # Create UI components
-    tabs_control = FormattedTextControl(text=get_tabs_text())
-    tabs_window = Window(content=tabs_control, height=1, align=WindowAlign.CENTER)
-
-    content_control = FormattedTextControl(text=get_content_text())
-    content_window = Window(
-        content=content_control,
-        width=Dimension(min=60, preferred=80),
-        height=Dimension(min=15, preferred=22),
-        align=WindowAlign.LEFT
-    )
-
-    footer_control = FormattedTextControl(text=get_footer_text())
-    footer_window = Window(content=footer_control, height=1)
-
-    layout = Layout(HSplit([tabs_window, content_window, footer_window]))
-    app = Application(layout=layout, key_bindings=kb, full_screen=False)
-
-    while True:
-        result = app.run()
-
-        if not result:
-            break
-
-        if result[0] == "edit":
-            item = result[1]
-            # info rows (e.g. AVAILABLE_MODELS) are not user-editable
-            if item["type"] == "info":
-                console.print("[dim]This row is read-only. Press [m] any time to refresh available models.[/dim]")
-                continue
-            current_value = config.get(item["key"], item["default"])
-            is_password = item["type"] == "secret"
-            # Pre-fill with the current value (empty string if unset).
-            default_text = str(current_value) if current_value else ""
-            label = item.get("label", item["key"])
-            try:
-                console.print(f"[dim]Editing {label} — type the value and press Enter (Esc/Ctrl-C to cancel):[/dim]")
-                new_value = prompt(
-                    message=f"{label} = ",
-                    default=default_text,
-                    is_password=is_password,
-                )
-                if new_value is not None:
-                    config[item["key"]] = new_value
-                    # After writing legacy key, also keep new unified alias in sync
-                    from core.runtime import set_llm_field
-                    _synced = False
-                    for field, legacy in (
-                        ("provider", "LLM_PROVIDER"),
-                        ("llm_model", "LLM_MODEL"),
-                        ("provider_url", "CUSTOM_BASE_URL"),
-                        ("provider_url", "DASHSCOPE_ENDPOINT"),
-                        ("api_key", "OPENAI_API_KEY"),
-                        ("api_key", "DEEPSEEK_API_KEY"),
-                        ("api_key", "DASHSCOPE_API_KEY"),
-                        ("api_key", "CUSTOM_API_KEY"),
-                    ):
-                        if item["key"] == legacy:
-                            set_llm_field(config, field, new_value)
-                            _synced = True
-                    shown = ("*" * 8) if (is_password and new_value) else (new_value or "(cleared)")
-                    console.print(f"[green]Set {label} = {shown}[/green] [dim](press 's' to save)[/dim]")
-                content_control.text = get_content_text()
-            except (KeyboardInterrupt, EOFError):
-                console.print("[dim]Edit cancelled.[/dim]")
-            except Exception as e:
-                console.print(f"[red]Could not edit {label}: {e}[/red]")
-
-        elif result[0] == "fetch_models":
-            # Persist the current provider/URL/key so fetch uses fresh values.
-            save_config(config)
-            for k in ("CUSTOM_API_KEY", "DASHSCOPE_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY",
-                      "CUSTOM_BASE_URL", "DASHSCOPE_ENDPOINT", "CUSTOM_MODELS"):
-                if config.get(k):
-                    os.environ[k] = config[k]
-                elif k in os.environ:
-                    del os.environ[k]
-            provider = config.get("LLM_PROVIDER", "openai")
-            console.print("[dim]Fetching model list for provider '%s'...[/dim]" % provider)
-            try:
-                from core.runtime import fetch_provider_models, cache_available_models, set_llm_field
-                # [m] = explicit user refresh (per spec), ignore cache and go live
-                models = fetch_provider_models(provider, config, refresh=True)
-                if not models:
-                    raise RuntimeError("Provider returned no models.")
-
-                # Persist the merged list to the cache for next-time display.
-                # persist=False because user must still press [s] to save.
-                cache_available_models(provider, models, config, persist=False)
-
-                current_model = config.get("LLM_MODEL", "")
-                default_idx = models.index(current_model) if current_model in models else 0
-                # Flush before dropping into menu so user sees fetch log.
-                try:
-                    import sys
-                    sys.stdout.flush()
-                except Exception:
-                    pass
-                idx = interactive_menu(
-                    "Select a model for %s (Enter to choose, Esc/q to cancel)" % provider,
-                    models, default_idx,
-                )
-                if idx is not None and idx >= 0:
-                    chosen = models[idx]
-                    config["LLM_MODEL"] = chosen
-                    # Keep new unified alias in sync alongside legacy key
-                    set_llm_field(config, "llm_model", chosen)
-                    set_llm_field(config, "provider", provider)
-                    console.print(
-                        "[green]Selected model: %s[/green] "
-                        "[dim](saved to available_models cache; press 's' to save permanently)[/dim]"
-                        % chosen
-                    )
-                else:
-                    console.print("[dim]Model selection cancelled — cached list still updated.[/dim]")
-                content_control.text = get_content_text()
-            except Exception as e:
-                console.print("[red]Could not fetch models: %s[/red]" % str(e))
-                # For custom provider, offer to enter a model name directly right here
-                if provider == "custom":
-                    try:
-                        import sys
-                        sys.stdout.flush()
-                        typed = prompt(
-                            "Type a model name to use (Enter=apply, Esc=cancel): ",
-                            default=config.get("LLM_MODEL") or "",
-                        )
-                        if typed is not None:
-                            typed = typed.strip()
-                            if typed:
-                                from core.runtime import set_llm_field
-                                config["LLM_MODEL"] = typed
-                                set_llm_field(config, "llm_model", typed)
-                                console.print(
-                                    "[green]Set LLM Model = %s[/green] [dim](press 's' to save)[/dim]"
-                                    % typed
-                                )
-                                console.print(
-                                    "[dim]Tip: to pin this model in the [m] list permanently, "
-                                    "set CUSTOM_MODELS=\"%s,...\" in the LLM section.[/dim]"
-                                    % typed
-                                )
-                            else:
-                                console.print("[dim]No model name entered.[/dim]")
-                    except (KeyboardInterrupt, EOFError):
-                        console.print("[dim]Cancelled.[/dim]")
-                    except Exception as prompt_err:
-                        console.print("[dim]Could not prompt for model: %s[/dim]" % prompt_err)
-                console.print(
-                    "[dim]Tip: select the LLM Model row and press Enter to edit it "
-                    "manually. For the 'custom' provider you can also set "
-                    "CUSTOM_MODELS=\"model-a,model-b\" in the LLM section to "
-                    "pin a permanent list.[/dim]"
-                )
-
-        elif result[0] == "saved":
-            console.print("[green]Configuration saved successfully![/green]")
-            break
-
-        elif result[0] == "confirm_quit":
-            if Confirm.ask("You have unsaved changes. Save before quitting?"):
-                save_config_and_update()
-                console.print("[green]Configuration saved![/green]")
-            break
-
-        elif result[0] == "quit":
-            break
+    """Open the provider-scoped configuration UI."""
+    from core.config_ui import run_config_ui
+    run_config_ui(agent)
 
 
 def handle_config_command(command_parts, agent=None):
@@ -2067,17 +1561,26 @@ def handle_console_command(user_input):
 
 
 def check_setup():
-    """Checks if the environment is set up (e.g., API keys exist)."""
-    # 1. Check environment variable
-    if os.getenv("OPENAI_API_KEY"):
-        return True
+    """Check whether the configured provider has what it needs."""
+    from core.runtime import _PROVIDER_KEY_BINDINGS, get_llm_config
 
-    # 2. Check config file
     config = load_config()
-    if config.get("OPENAI_API_KEY"):
-        os.environ["OPENAI_API_KEY"] = config["OPENAI_API_KEY"]
+    provider = get_llm_config(config)["provider"]
+    if provider in ("ollama", "llama"):
         return True
-
+    if provider == "custom":
+        base = os.getenv("CUSTOM_BASE_URL") or config.get("CUSTOM_BASE_URL")
+        return bool(base)
+    key_name = _PROVIDER_KEY_BINDINGS.get(provider, {}).get("api_key")
+    if key_name:
+        value = os.getenv(key_name) or config.get(key_name)
+        if value:
+            os.environ[key_name] = str(value)
+            return True
+    # Legacy fallback: a fresh install with only OPENAI_API_KEY still works.
+    if os.getenv("OPENAI_API_KEY") or config.get("OPENAI_API_KEY"):
+        os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY") or config["OPENAI_API_KEY"]
+        return True
     return False
 
 def run_setup_wizard():
@@ -2145,13 +1648,34 @@ def main():
 
     print_banner()
 
+    # Fast paths that do not need the model or the ADK runner.  Handling them
+    # before importing the harness keeps "make pa prompt=/get_current_time"
+    # and "make pa prompt=!pwd" under a second.
+    if args.prompt:
+        _early = args.prompt.strip()
+        if _early.startswith("!"):
+            from core.harness import run_shell_command
+            run_shell_command(_early[1:].strip(), console)
+            return
+        if _early.startswith("/"):
+            from core.harness import call_tool, parse_tool_command
+            _shortcut = parse_tool_command(_early)
+            if _shortcut:
+                _name, _args = _shortcut
+                console.print(f"[dim]Direct tool: {_name} · 0 model tokens[/dim]")
+                console.print(call_tool(_name, _args))
+                return
+
     if not check_setup():
         run_setup_wizard()
 
-    # Import agent — skeleton init is <150ms; skill registration + LangChain
-    # agent load happens in a daemon thread *after* the intro banner below.
+    # The CLI and the web console now share one execution engine: the ADK
+    # harness in core.runner.  Skills are a lazy registry, so this builds the
+    # runner without importing every skill module.
     try:
-        from agent import agent
+        from core.runner import get_agent
+        console.print("[dim]Loading Collig harness...[/dim]")
+        agent = get_agent()
         from skills.menu import set_menu_functions
         from skills.news import NewsSkill
 
@@ -2180,21 +1704,26 @@ def main():
     # Bottom toolbar with hints
     def get_bottom_toolbar():
         return to_formatted_text([
-            ('bold', ' [Ctrl+C]'), ('', ' Stop Thinking  '),
+            ('bold', ' [Ctrl+C]'), ('', ' Stop  '),
             ('bold', '[/]'), ('', ' Commands  '),
+            ('bold', '[!]'), ('', ' Shell  '),
             ('bold', '[↑/↓]'), ('', ' History  '),
             ('bold', '[Tab]'), ('', ' Complete')
         ], style='class:bottom-toolbar')
 
-    # Create persistent history file path
+    # Create persistent history file path.  Do not build a PromptSession for
+    # --prompt runs: there is no stdin to attach it to, and prompt_toolkit
+    # warns loudly about it.
     history_file = os.path.join(paths.data_dir, "command_history.txt")
-    pt_session = PromptSession(
-        history=FileHistory(history_file),
-        completer=completer,
-        complete_while_typing=True,
-        key_bindings=kb,
-        bottom_toolbar=get_bottom_toolbar
-    )
+    pt_session = None
+    if not args.prompt:
+        pt_session = PromptSession(
+            history=FileHistory(history_file),
+            completer=completer,
+            complete_while_typing=True,
+            key_bindings=kb,
+            bottom_toolbar=get_bottom_toolbar
+        )
 
     # Custom style for prompt_toolkit
     style = Style.from_dict({
@@ -2227,6 +1756,20 @@ def main():
     if args.prompt:
         console.print(f"[bold cyan]Session: {session_id}[/bold cyan]\n")
         console.print(f"[bold green]You:[/bold green] {args.prompt}\n")
+        prompt_text = args.prompt.strip()
+        # Same shortcuts as the interactive loop, so scripts can use them.
+        if prompt_text.startswith("!"):
+            from core.harness import run_shell_command
+            run_shell_command(prompt_text[1:].strip(), console)
+            return
+        if prompt_text.startswith("/"):
+            from core.harness import call_tool, parse_tool_command
+            shortcut = parse_tool_command(prompt_text)
+            if shortcut:
+                tool_name, tool_args = shortcut
+                console.print(f"[dim]Direct tool: {tool_name} · 0 model tokens[/dim]")
+                console.print(call_tool(tool_name, tool_args))
+                return
         try:
             # Process the prompt using agent's process_message method
             result = agent.process_message(args.prompt, session_id)
@@ -2242,19 +1785,17 @@ def main():
 
     console.print("[bold blue]Collig Co-worker AI - CLI Mode[/bold blue]")
     console.print("Type [bold yellow]'exit'[/bold yellow] or [bold yellow]'quit'[/bold yellow] to end the session.")
-    console.print("Press [bold yellow]Ctrl+C[/bold yellow] to cancel current operation while thinking.\n")
+    console.print("Press [bold yellow]Ctrl+C[/bold yellow] to cancel current operation while thinking.")
+    console.print(
+        "Use [bold cyan]/config[/bold cyan] for settings, [bold cyan]!<cmd>[/bold cyan] for a shell command, "
+        "or [bold cyan]/<tool>[/bold cyan] to call a tool directly.\n"
+    )
 
-    # Kick off skill loading in a background daemon thread *after* printing the
-    # welcome banner but *before* entering the interactive prompt loop. The
-    # user sees the prompt instantly; skills register + LangChain agent builds
-    # silently in the background. The first process_message() call blocks on
-    # ensure_ready() automatically.
     import sys
-    def _on_skills_ready(a):
-        # Rich Console is thread-safe; print an unobtrusive ready hint.
-        console.print("[dim]All skills ready[/dim]")
-    agent.load_skills_async(config=config, on_done=_on_skills_ready)
-    console.print("[dim]Skills loading in background; the prompt is ready immediately.[/dim]")
+    console.print(
+        f"[dim]Harness ready · {len(agent.skill_manager.skills)} skills registered lazily · "
+        f"{len(agent.tools)} tools catalogued[/dim]"
+    )
     # Flush stdout so Rich output renders before prompt_toolkit grabs the screen
     sys.stdout.flush()
     sys.stderr.flush()
@@ -2264,8 +1805,30 @@ def main():
             # Use prompt_toolkit's session.prompt() for history navigation
             user_input = pt_session.prompt([('class:prompt', 'You: ')], style=style)
 
-            # Handle built-in CLI commands (like config)
+            # Shell escape: "! pwd" runs the command directly, like Claude Code.
+            if user_input.startswith("!"):
+                from core.harness import run_shell_command
+                run_shell_command(user_input[1:].strip(), console)
+                continue
+
+            # Deterministic tool shortcut: "/get_current_time" calls the tool
+            # directly, with no model round-trip and no tool schemas.
             if user_input.startswith("/"):
+                from core.harness import call_tool, parse_tool_command
+                shortcut = parse_tool_command(user_input)
+                if shortcut:
+                    tool_name, tool_args = shortcut
+                    console.print(f"[dim]Direct tool: {tool_name} · 0 model tokens[/dim]")
+                    output = call_tool(tool_name, tool_args)
+                    console.print(output)
+                    if session_id and output:
+                        try:
+                            agent.session_manager.add_message(session_id, "user", user_input)
+                            agent.session_manager.add_message(session_id, "ai", output)
+                        except Exception:
+                            pass
+                    console.print()
+                    continue
                 # Remove slash if it's there
                 user_input = user_input[1:]
 
@@ -2357,9 +1920,69 @@ def main():
                     from core.news_cache import get_news_cache_manager
 
                     parts = user_input.split()
+                    cache_mgr = get_news_cache_manager()
+                    searches = cache_mgr.get_all_searches()
+                    sub = parts[1].lower() if len(parts) > 1 else ""
+
+                    # Explicitly save / re-cache the current in-memory list.
+                    if sub in ("save", "cache"):
+                        current = NewsSkill.get_news_cache()
+                        if not current:
+                            console.print("[yellow]No current news list to save. Search first.[/yellow]")
+                            continue
+                        cache_id = cache_mgr.save_search(NewsSkill.get_last_query(), current)
+                        NewsSkill._current_cache_id = cache_id
+                        console.print(f"[green]Saved current search to cache.[/green] [dim](ID: {cache_id})[/dim]")
+                        console.print("[dim]Reopen it with /news last, or browse everything with /news cached.[/dim]")
+                        continue
+
+                    # Reopen the most recent cached search without searching again.
+                    if sub in ("last", "recent"):
+                        if not searches:
+                            console.print("[yellow]No cached news searches yet. Search for news first.[/yellow]")
+                            continue
+                        entry = searches[0]
+                        NewsSkill._news_cache = entry.news_items
+                        NewsSkill._last_query = entry.query
+                        NewsSkill._just_searched = True
+                        NewsSkill._current_cache_id = entry.cache_id
+                        console.print(f"[green]Loaded most recent cached search: {entry.query}[/green]")
+                        browse_news_items(entry.news_items, entry.query, agent)
+                        continue
+
+                    # Load a specific cached search by number or cache id.
+                    if sub in ("load", "open") and len(parts) > 2:
+                        target = parts[2]
+                        entry = None
+                        if target.isdigit():
+                            idx = int(target) - 1
+                            if 0 <= idx < len(searches):
+                                entry = searches[idx]
+                        else:
+                            entry = cache_mgr.get_search(target)
+                        if entry is None:
+                            console.print("[yellow]Cached search not found. Use /news cached to see the list.[/yellow]")
+                            continue
+                        NewsSkill._news_cache = entry.news_items
+                        NewsSkill._last_query = entry.query
+                        NewsSkill._just_searched = True
+                        NewsSkill._current_cache_id = entry.cache_id
+                        console.print(f"[green]Loaded: {entry.query}[/green]")
+                        browse_news_items(entry.news_items, entry.query, agent)
+                        continue
+
+                    # Plain-text list (no interactive menu).
+                    if sub in ("ls", "plain", "text"):
+                        if not searches:
+                            console.print("[yellow]No cached news searches yet.[/yellow]")
+                            continue
+                        for i, entry in enumerate(searches, 1):
+                            console.print(f"  {i}. {entry.get_display_title()} [dim]({len(entry.news_items)} items)[/dim]")
+                        console.print("[dim]Use /news load <number> to reopen one.[/dim]")
+                        continue
 
                     # Check if user wants to browse cached news
-                    if len(parts) > 1 and parts[1].lower() in ["cached", "history", "saved", "list"]:
+                    if sub in ["cached", "history", "saved", "list"]:
                         # Browse cached news searches
                         cache_mgr = get_news_cache_manager()
                         searches = cache_mgr.get_all_searches()
@@ -2429,21 +2052,25 @@ def main():
                                     break
                         continue
 
-                    # Regular news menu for current search
+                    # Regular /news: browse the current list. If this process
+                    # has no in-memory list (for example after a restart), fall
+                    # back to the most recent cached search.
                     news_cache = NewsSkill.get_news_cache()
+                    news_query = NewsSkill.get_last_query()
+                    if not news_cache and searches:
+                        entry = searches[0]
+                        NewsSkill._news_cache = entry.news_items
+                        NewsSkill._last_query = entry.query
+                        NewsSkill._just_searched = True
+                        NewsSkill._current_cache_id = entry.cache_id
+                        news_cache = entry.news_items
+                        news_query = entry.query
+                        console.print(f"[green]Loaded most recent cached search: {entry.query}[/green]")
                     if news_cache:
-                        news_query = NewsSkill.get_last_query()
-                        # Keep menu open until user quits
-                        while True:
-                            news_action = interactive_news_menu(news_cache, news_query)
-                            if news_action:
-                                handle_news_action(news_action, agent)
-                            else:
-                                # User quit the menu
-                                break
+                        browse_news_items(news_cache, news_query, agent)
                     else:
-                        console.print("[yellow]No news items available. Try searching for news first![/yellow]")
-                        console.print("[dim]Tip: Say 'list cached news' to browse saved searches[/dim]")
+                        console.print("[yellow]No news items available. Try /search_news <query> first.[/yellow]")
+                        console.print("[dim]Tip: /news cached browses saved searches; /news last reopens the newest one.[/dim]")
                 except Exception as e:
                     console.print(f"[red]Error opening news menu: {e}[/red]")
                 continue
@@ -2977,6 +2604,10 @@ def main():
         except KeyboardInterrupt:
             # Double Ctrl+C to exit
             console.print("\n[bold blue]Collig:[/bold blue] Goodbye!")
+            break
+        except EOFError:
+            # Piped stdin / Ctrl+D: leave cleanly instead of printing an
+            # empty error and looping.
             break
         except Exception as e:
             console.print(f"[bold red]Error:[/bold red] {str(e)}")

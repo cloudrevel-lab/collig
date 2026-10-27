@@ -43,11 +43,17 @@ class ProviderError(RuntimeError):
 
 
 def dashscope_base_url(config: Optional[Dict[str, Any]] = None) -> str:
-    """The DashScope endpoint for the configured region (default: china)."""
+    """The DashScope endpoint for the configured region (default: china).
+
+    The endpoint key normally holds a region name, but older writes and the
+    generic Set Base URL path may leave a full URL there. Accept both.
+    """
     if config is None:
         config = load_config()
-    region = config.get("DASHSCOPE_ENDPOINT", "china")
-    return DASHSCOPE_ENDPOINTS.get(region, DASHSCOPE_ENDPOINTS["china"])
+    raw = str(config.get("DASHSCOPE_ENDPOINT", "china") or "china")
+    if raw.startswith("http"):
+        return raw
+    return DASHSCOPE_ENDPOINTS.get(raw.lower(), DASHSCOPE_ENDPOINTS["china"])
 
 
 def resolve_model(provider: Optional[str] = None, model: Optional[str] = None) -> LiteLlm:

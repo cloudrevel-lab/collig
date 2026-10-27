@@ -22,23 +22,23 @@ Collig is a powerful, locally-running AI agent designed to act as your personal 
     - 🔖 **Bookmarks** — Full CRUD table with search, tags, and resizable column widths
     - 📝 **Notes** — Card-based layout with search, edit, and delete
     - 🎨 **Light/Dark Theme** — Toggle with persisted preference
--   **💻 Interactive CLI:** A rich terminal interface with autocompletion, session management, history, and `/console` commands for admin console management.
+-   **💻 Interactive CLI:** A rich terminal interface with autocompletion, session management, history, a structured thinking/planning timeline, `!<command>` shell passthrough, `/<tool>` direct tool calls, and `/console` commands for admin console management.
 -   **🛡️ Secure & Local:** Runs on your machine. Includes `backup`, `restore`, and `load` commands for easy data migration.
 -   **🔄 Auto-Reload:** The admin console server automatically restarts when Python files change.
 
 ## 🛠️ Tech Stack
 
--   **Backend:** Python 3.12+, FastAPI, LangChain, LangGraph, ChromaDB
+-   **Backend:** Python 3.13+, FastAPI, Google ADK (agent harness), LiteLLM, ChromaDB
 -   **Frontend:** Vue 3, Vite, Vuetify 3, Vue Router, Marked
 -   **Package Management:** `uv` (Python), npm (Frontend)
 
 ## 📦 Installation
 
 Prerequisites:
--   Python 3.12+
+-   Python 3.13+
 -   `uv` (Python package manager)
 -   Node.js / npm (for frontend)
--   OpenAI API Key
+-   An API key for your chosen provider (OpenAI, DeepSeek, DashScope) or a local Ollama server
 
 1.  **Clone the repository:**
     ```bash
@@ -66,7 +66,12 @@ make pa
 -   `/backup`: Backup your data (config, memory, sessions, bookmarks, notes, diary) to a zip file.
 -   `/restore <path>`: Restore data from a backup zip (overwrites existing data).
 -   `/load <path>`: Load and merge data from a backup zip (preserves existing entries, only adds new ones).
--   `/config`: Interactive configuration manager.
+-   `/config`: Provider-scoped configuration manager. Pick a provider, then
+    edit only that provider's key, endpoint and model. `Esc` goes back one
+    level; `q` quits.
+-   `!<command>`: Run a shell command directly, e.g. `!pwd`, `!git status`.
+-   `/<tool> [args]`: Call a tool directly without a model round-trip, e.g.
+    `/get_current_time`. This is the cheapest path for deterministic tools.
 -   `/stats`: View token usage statistics.
 -   `/status`: Check system status and LLM connection.
 -   `/console status`: Check if the admin console is running.

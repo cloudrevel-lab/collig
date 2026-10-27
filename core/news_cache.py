@@ -88,9 +88,23 @@ class NewsCacheManager:
         except Exception as e:
             print(f"[dim]Warning: Failed to save news cache: {e}[/dim]")
 
+    @staticmethod
+    def _item_urls(news_items: List[Dict[str, Any]]) -> List[str]:
+        urls = []
+        for item in news_items or []:
+            url = str(item.get("url") or "").strip()
+            if url:
+                urls.append(url)
+        return urls
+
     def save_search(self, query: str, news_items: List[Dict[str, Any]]) -> str:
         """
         Save a news search to cache.
+
+        Identical searches (same query and same article URLs) update the
+        existing entry instead of creating a duplicate.  Re-running a search
+        after a few minutes is common, and duplicate rows make the cached
+        list hard to browse.
 
         Args:
             query: The search query
@@ -99,6 +113,17 @@ class NewsCacheManager:
         Returns:
             The cache ID of the saved entry
         """
+        wanted = (query or "").strip().lower()
+        new_urls = self._item_urls(news_items)
+        for existing in self._cached_entries:
+            if (existing.query or "").strip().lower() != wanted:
+                continue
+            if self._item_urls(existing.news_items) == new_urls:
+                existing.news_items = news_items
+                existing.timestamp = datetime.now().isoformat()
+                self._save_cache()
+                return existing.cache_id
+
         entry = NewsCacheEntry(query=query, news_items=news_items)
         self._cached_entries.insert(0, entry)  # Add to beginning (most recent first)
 
