@@ -63,6 +63,8 @@ def _terminal_proxy_port(request: Request) -> int:
 class _TerminalCreatePydantic(BaseModel):
     cols: int = 120
     rows: int = 32
+    # Optional existing web-chat session to resume inside the terminal.
+    session_id: str | None = None
 
 
 @router.get("/api/terminal/bootstrap")
@@ -97,7 +99,10 @@ def create_terminal_session(request: Request, body: _TerminalCreatePydantic = _T
     if not mgr.authorize(_terminal_token_from_request(request)):
         raise HTTPException(status_code=401, detail="terminal access token required")
     try:
-        created = mgr.create_session(proxy_port=_terminal_proxy_port(request))
+        created = mgr.create_session(
+            proxy_port=_terminal_proxy_port(request),
+            requested_session_id=body.session_id,
+        )
     except Exception as exc:
         status = 503 if isinstance(exc, TerminalUnavailable) else 429
         raise HTTPException(status_code=status, detail=str(exc))

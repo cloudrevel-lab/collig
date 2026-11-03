@@ -119,31 +119,18 @@
     </v-card>
 
     <v-theme-provider :theme="terminalTheme">
-      <v-card :class="['terminal-card', 'terminal-window--' + windowMode]" rounded="lg" elevation="3">
+      <v-card class="terminal-card" rounded="lg" elevation="3">
       <div class="terminal-toolbar">
         <div class="terminal-toolbar-left">
           <span class="terminal-dot red"></span>
           <span class="terminal-dot amber"></span>
           <span class="terminal-dot green"></span>
           <span class="terminal-title">{{ sessionId ? 'collig — sandbox ' + sessionId.substring(0, 8) : 'collig — not connected' }}</span>
-          <span class="window-mode-label">{{ currentWindowLabel }}</span>
+          <v-chip v-if="requestedSessionId" size="x-small" variant="tonal" color="primary">
+            web session {{ requestedSessionId.substring(0, 8) }}
+          </v-chip>
         </div>
         <div class="terminal-toolbar-right">
-          <div class="terminal-window-controls" role="group" aria-label="Terminal window layout">
-            <v-btn
-              v-for="mode in windowModes"
-              :key="mode.id"
-              :icon="mode.icon"
-              size="x-small"
-              variant="text"
-              :color="windowMode === mode.id ? 'primary' : 'white'"
-              :class="['window-control-btn', { 'window-control-active': windowMode === mode.id }]"
-              :title="mode.label"
-              :aria-label="mode.label"
-              :aria-pressed="windowMode === mode.id"
-              @click="setWindowMode(mode.id)"
-            />
-          </div>
           <v-btn
             :icon="isDark ? 'mdi-white-balance-sunny' : 'mdi-weather-night'"
             size="x-small"
@@ -176,7 +163,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
@@ -188,32 +175,15 @@ defineProps({
 
 const { terminalTheme, isDark, toggle: toggleTerminalThemeState } = useTerminalTheme()
 
-const WINDOW_STORAGE_KEY = 'collig-terminal-window-mode'
-const windowModes = [
-  { id: 'normal', icon: 'mdi-window-restore', label: 'Restore normal window', state: 'Normal' },
-  { id: 'max', icon: 'mdi-window-maximize', label: 'Maximize', state: 'Maximized' },
-  { id: 'left', icon: 'mdi-dock-left', label: 'Snap to left half', state: 'Left half' },
-  { id: 'right', icon: 'mdi-dock-right', label: 'Snap to right half', state: 'Right half' },
-  { id: 'bottom', icon: 'mdi-dock-bottom', label: 'Snap to bottom half', state: 'Bottom half' },
-]
-const validWindowModes = new Set(windowModes.map((mode) => mode.id))
-
-function loadWindowMode() {
+function readRequestedSessionId() {
   try {
-    const saved = localStorage.getItem(WINDOW_STORAGE_KEY)
-    if (saved && validWindowModes.has(saved)) return saved
+    const hash = window.location.hash || ''
+    const hashQuery = hash.includes('?') ? hash.slice(hash.indexOf('?') + 1) : ''
+    const fromHash = new URLSearchParams(hashQuery).get('session')
+    if (fromHash) return fromHash
+    return new URLSearchParams(window.location.search || '').get('session') || ''
   } catch (_) {
-    // localStorage can be unavailable in hardened/private browsers.
-  }
-  return 'normal'
-}
-
-function fitTerminalWindow() {
-  if (!fitAddon || !terminalEl.value || terminalEl.value.clientWidth <= 0) return
-  try {
-    fitAddon.fit()
-  } catch (_) {
-    // Ignore transient zero-size layouts while a snap transition runs.
+    return ''
   }
 }
 
@@ -225,28 +195,7 @@ const connecting = ref(false)
 const error = ref('')
 const sessionId = ref('')
 const socketState = ref('idle')
-const windowMode = ref(loadWindowMode())
-const currentWindowLabel = computed(
-  () => windowModes.find((mode) => mode.id === windowMode.value)?.state || 'Normal',
-)
-
-function setWindowMode(mode) {
-  if (!validWindowModes.has(mode)) return
-  windowMode.value = mode
-  try {
-    localStorage.setItem(WINDOW_STORAGE_KEY, mode)
-  } catch (_) {
-    // Ignore persistence failures; the layout still applies for this view.
-  }
-  nextTick(() => {
-    requestAnimationFrame(() => {
-      fitTerminalWindow()
-      // A second pass catches the final flex/card dimensions after the fixed
-      // positioning and any CSS transition settle.
-      setTimeout(fitTerminalWindow, 120)
-    })
-  })
-}
+const requestedSessionId = ref(readRequestedSessionId())
 
 let term = null
 let fitAddon = null
@@ -382,7 +331,11 @@ async function connect() {
     const res = await fetch('/api/terminal/sessions', {
       method: 'POST',
       headers: apiHeaders(),
-      body: JSON.stringify({ cols, rows }),
+      body: JSON.stringify({
+        cols,
+        rows,
+        session_id: requestedSessionId.value || undefined,
+      }),
     })
     if (res.status === 401) {
       authRequired.value = true
@@ -558,64 +511,8 @@ onBeforeUnmount(() => {
   width: 100%;
   min-width: 0;
 }
-/* Snap modes are intentionally viewport-fixed: like a desktop window, they
-   float above the admin chrome and can be restored from the title bar. */
-.terminal-window--max,
-.terminal-window--left,
-.terminal-window--right,
-.terminal-window--bottom {
-  position: fixed;
-  z-index: 3000;
-  margin: 0 !important;
-  border-radius: 0 !important;
-  max-width: none;
-  max-height: none;
-  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.5);
-}
-.terminal-window--max {
-  inset: 0;
-  width: 100vw;
-  height: 100vh;
-}
-.terminal-window--left {
-  top: 0;
-  left: 0;
-  width: 50vw;
-  height: 100vh;
-  border-right: 1px solid rgba(255, 255, 255, 0.12);
-}
-.terminal-window--right {
-  top: 0;
-  right: 0;
-  width: 50vw;
-  height: 100vh;
-  border-left: 1px solid rgba(255, 255, 255, 0.12);
-}
-.terminal-window--bottom {
-  left: 0;
-  bottom: 0;
-  width: 100vw;
-  height: 50vh;
-  border-top: 1px solid rgba(255, 255, 255, 0.12);
-}
-.terminal-window--max .terminal-host,
-.terminal-window--left .terminal-host,
-.terminal-window--right .terminal-host,
-.terminal-window--bottom .terminal-host {
-  height: auto;
-  max-height: none;
-  min-height: 0;
-}
 @media (max-width: 760px) {
-  .terminal-window--left,
-  .terminal-window--right {
-    width: 100vw;
-  }
-  .terminal-window--bottom {
-    height: 60vh;
-  }
-  .terminal-hint,
-  .window-mode-label {
+  .terminal-hint {
     display: none;
   }
 }
@@ -641,29 +538,8 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 12px;
 }
-.terminal-window-controls {
-  display: flex;
-  align-items: center;
-  gap: 1px;
-  padding: 1px;
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.06);
-}
-.terminal-window-controls :deep(.v-btn) {
-  width: 26px;
-  height: 26px;
-  min-width: 26px;
-  opacity: 0.72;
-}
-.terminal-window-controls :deep(.v-btn.window-control-active) {
-  opacity: 1;
-  background: rgba(var(--v-theme-primary), 0.22);
-}
-.window-mode-label {
-  margin-left: 4px;
-  font-size: 11px;
-  opacity: 0.5;
-  white-space: nowrap;
+.terminal-theme-btn {
+  opacity: 0.8;
 }
 .terminal-dot {
   width: 10px;

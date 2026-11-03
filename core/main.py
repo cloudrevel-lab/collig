@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import HTMLResponse
 from contextlib import asynccontextmanager
 from pydantic import BaseModel, field_validator
 from dotenv import load_dotenv
@@ -1541,6 +1541,31 @@ _app.include_router(terminal_router)
 
 FRONTEND_DIST = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
 
+
+def _frontend_index_html() -> str:
+    """Return index.html with the server-selected landing route injected.
+
+    5005 defaults to Chat; the terminal-app target starts this same full app
+    with COLLIG_LANDING_VIEW=terminal so the sidebar remains available while
+    the terminal becomes the landing page.
+    """
+    index_path = os.path.join(FRONTEND_DIST, "index.html")
+    try:
+        with open(index_path, "r", encoding="utf-8") as handle:
+            html = handle.read()
+    except OSError:
+        raise HTTPException(status_code=503, detail="Frontend build is missing")
+    landing = (os.environ.get("COLLIG_LANDING_VIEW") or "chat").strip().lower()
+    if landing not in {"chat", "terminal"}:
+        landing = "chat"
+    injection = '<script>window.__COLLIG_LANDING_VIEW__=' + _json.dumps(landing) + ';</script>'
+    if "</head>" in html:
+        html = html.replace("</head>", injection + "</head>", 1)
+    else:
+        html = injection + html
+    return html
+
+
 if os.path.exists(FRONTEND_DIST):
     _app.mount("/assets", StaticFiles(directory=os.path.join(FRONTEND_DIST, "assets")), name="assets")
 
@@ -1549,4 +1574,4 @@ if os.path.exists(FRONTEND_DIST):
     async def serve_frontend(path: str = ""):
         if path.startswith("api/") or path.startswith("assets/"):
             raise HTTPException(status_code=404, detail="Not found")
-        return FileResponse(os.path.join(FRONTEND_DIST, "index.html"))
+        return HTMLResponse(content=_frontend_index_html(), headers={"Cache-Control": "no-store"})

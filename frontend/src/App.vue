@@ -1,6 +1,6 @@
 <template>
   <v-app>
-    <v-navigation-drawer v-model="drawer" permanent>
+    <v-navigation-drawer v-model="drawer" :rail="rail" permanent>
       <v-list-item
         prepend-avatar="https://api.dicebear.com/7.x/bottts/svg?seed=collig"
         title="Collig"
@@ -20,6 +20,12 @@
     </v-navigation-drawer>
 
     <v-app-bar elevation="1">
+      <v-btn
+        :icon="rail ? 'mdi-menu' : 'mdi-menu-open'"
+        variant="text"
+        :title="rail ? 'Expand sidebar' : 'Collapse sidebar'"
+        @click="rail = !rail"
+      />
       <v-app-bar-title>{{ currentTitle }}</v-app-bar-title>
       <v-spacer />
       <v-btn
@@ -44,6 +50,7 @@ import { useRoute } from 'vue-router'
 import { useThemeToggle } from './composables/useTheme'
 
 const drawer = ref(true)
+const rail = ref(false)
 const route = useRoute()
 const { toggleTheme, isDark } = useThemeToggle()
 

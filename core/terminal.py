@@ -19,9 +19,9 @@ short-lived Docker container with:
 * a per-session internal Docker network.  The container has no route to the
   host/LAN/Internet; only a tiny relay sidecar is reachable;
 * no provider credentials.  The CLI talks to a per-session LLM proxy on the
-  host through the relay.  The proxy injects the real key.  A user who runs
-  !env or !cat ~/.collig/config.json finds only a disposable token that can
-  call one endpoint on one session.
+  host through the relay.  The relay holds the disposable proxy token; the
+  sandbox config contains only http://relay:8080/v1 and the literal placeholder
+  key relay-managed.  !env / !cat cannot recover a usable credential.
 
 Configuration (environment):
 
@@ -53,6 +53,7 @@ import ipaddress
 import json
 import os
 import pty
+import re
 import secrets
 import shutil
 import signal
@@ -127,6 +128,9 @@ class TerminalSettings:
     relay_port: int = 8080
     proxy_rate_limit: int = 240
     proxy_rate_window: int = 600
+    # Host directory containing <session-id>.json.  Injectable for tests and
+    # for deployments that keep sessions somewhere other than ~/.collig.
+    session_store_dir: Optional[Path] = None
 
     @classmethod
     def from_env(cls) -> "TerminalSettings":
@@ -158,6 +162,11 @@ class TerminalSettings:
             relay_port=max(1, _env_int("COLLIG_TERMINAL_RELAY_PORT", 8080)),
             proxy_rate_limit=max(1, _env_int("COLLIG_TERMINAL_PROXY_RATE_LIMIT", 240)),
             proxy_rate_window=max(10, _env_int("COLLIG_TERMINAL_PROXY_RATE_WINDOW", 600)),
+            session_store_dir=(
+                Path(_env("COLLIG_TERMINAL_SESSION_STORE")).expanduser()
+                if _env("COLLIG_TERMINAL_SESSION_STORE")
+                else None
+            ),
         )
 
 
@@ -179,6 +188,7 @@ class TerminalSession:
     network_name: str = ""
     relay_name: str = ""
     container_name: str = ""
+    requested_session_id: Optional[str] = None
     requests: Deque[float] = field(default_factory=deque)
 
     def touch(self) -> None:
@@ -333,6 +343,12 @@ class TerminalManager:
         self._docker_checked_at = 0.0
         self._docker_ok: Optional[bool] = None
         self._docker_error = ""
+        if self.settings.session_store_dir is not None:
+            self.session_store = Path(self.settings.session_store_dir).expanduser().resolve()
+        else:
+            from core.paths import paths
+
+            self.session_store = Path(paths.sessions_dir).resolve()
 
     # ------------------------------------------------------------------
     # access control
@@ -471,10 +487,11 @@ class TerminalManager:
     # ------------------------------------------------------------------
     # session lifecycle
     # ------------------------------------------------------------------
-    def create_session(self, proxy_port: int = 0) -> Dict[str, Any]:
+    def create_session(self, proxy_port: int = 0, requested_session_id: Optional[str] = None) -> Dict[str, Any]:
         ready, reason = self.readiness()
         if not ready:
             raise TerminalUnavailable(reason)
+        requested = self._validate_requested_session(requested_session_id)
         self.reap_expired()
         with self._lock:
             active = [s for s in self._sessions.values() if s.status != "closed"]
@@ -502,8 +519,18 @@ class TerminalManager:
                 network_name=f"collig-term-{sid}",
                 relay_name=f"collig-relay-{sid}",
                 container_name=f"collig-term-{sid}",
+                requested_session_id=requested,
             )
-            self._write_session_config(session)
+            try:
+                self._write_session_config(session)
+                if requested:
+                    self._seed_chat_session(session)
+            except Exception:
+                try:
+                    shutil.rmtree(root)
+                except OSError:
+                    pass
+                raise
             self._sessions[sid] = session
             ticket = self.issue_ticket(sid)
         return {
@@ -511,7 +538,66 @@ class TerminalManager:
             "ticket": ticket["ticket"],
             "expires_in": ticket["expires_in"],
             "ws_path": "/api/terminal/ws?ticket=" + ticket["ticket"],
+            "chat_session_id": requested,
         }
+
+    def _validate_requested_session(self, requested_session_id: Optional[str]) -> Optional[str]:
+        requested = str(requested_session_id or "").strip()
+        if not requested:
+            return None
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,79}", requested):
+            raise TerminalError("invalid chat session id")
+        source = self.session_store / (requested + ".json")
+        if not source.is_file() or source.is_symlink():
+            raise TerminalError("chat session not found: " + requested)
+        return requested
+
+    def _seed_chat_session(self, session: TerminalSession) -> None:
+        """Copy only the selected host chat session into the sandbox HOME."""
+        requested = session.requested_session_id
+        if not requested:
+            return
+        target_dir = session.home / ".collig" / "sessions"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        for suffix in ("", "_stats"):
+            source = self.session_store / (requested + suffix + ".json")
+            if not source.is_file() or source.is_symlink():
+                continue
+            try:
+                shutil.copy2(source, target_dir / (requested + suffix + ".json"))
+            except OSError as exc:
+                raise TerminalError("could not seed chat session: " + str(exc)) from exc
+
+    def _sync_chat_session(self, session: TerminalSession) -> None:
+        """Copy the sandbox copy of a resumed session back to the host.
+
+        Only the selected session id is ever synced.  This is intentionally a
+        small, explicit bridge instead of mounting the host session directory,
+        so the terminal cannot touch unrelated sessions.
+        """
+        requested = session.requested_session_id
+        if not requested:
+            return
+        source_dir = session.home / ".collig" / "sessions"
+        if not source_dir.is_dir():
+            return
+        self.session_store.mkdir(parents=True, exist_ok=True)
+        for suffix in ("", "_stats"):
+            source = source_dir / (requested + suffix + ".json")
+            if not source.is_file() or source.is_symlink():
+                continue
+            destination = self.session_store / (requested + suffix + ".json")
+            temp = destination.with_name(
+                "." + destination.name + ".tmp-" + str(os.getpid()) + "-" + str(time.time_ns())
+            )
+            try:
+                shutil.copy2(source, temp)
+                os.replace(temp, destination)
+            except OSError:
+                try:
+                    temp.unlink()
+                except OSError:
+                    pass
 
     def issue_ticket(self, session_id: str) -> Dict[str, Any]:
         with self._lock:
@@ -603,6 +689,7 @@ class TerminalManager:
                     )
                 except Exception:
                     pass
+        self._sync_chat_session(session)
         if not self.settings.keep_sessions:
             try:
                 shutil.rmtree(session.root)
@@ -820,6 +907,8 @@ class TerminalManager:
             "python",
             "/app/core/cli.py",
         ]
+        if session.requested_session_id:
+            cmd.extend(["--session", session.requested_session_id])
         return cmd
 
     def spawn(self, session: TerminalSession, cols: int = 120, rows: int = 32) -> TerminalProcess:
@@ -829,6 +918,8 @@ class TerminalManager:
             if not _env_bool("COLLIG_TERMINAL_ALLOW_UNSANDBOXED", False):
                 raise TerminalUnavailable("host-unsafe backend is not explicitly enabled")
             command = [sys.executable, str(Path(__file__).resolve().parent / "cli.py")]
+            if session.requested_session_id:
+                command.extend(["--session", session.requested_session_id])
             env = self._host_env(session)
             cwd = str(session.workspace)
         else:

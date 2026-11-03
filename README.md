@@ -146,10 +146,9 @@ The first start can take a few minutes because the image installs Collig's Pytho
 dependencies. Later starts use the cached image. Every browser connection gets a
 fresh session and is deleted when it closes.
 
-The terminal title bar has window controls: restore, maximize, snap left half,
-snap right half and snap bottom half. The active icon is highlighted, the current
-mode is named next to the session id, and the choice is remembered in
-`localStorage`.
+The terminal title bar has a sun/moon control for the terminal's own dark/light
+theme (dark by default, remembered in `localStorage`). When the terminal was
+opened from a session row, it also shows which web-chat session is being resumed.
 
 #### Why a shell in the browser is safe here
 
@@ -219,33 +218,34 @@ and additionally requires `COLLIG_TERMINAL_ALLOW_UNSANDBOXED=1`. It runs the CLI
 on the host and does **not** provide the container boundary; never use it for a
 shared deployment or for untrusted users.
 
-### 🚀 Standalone Terminal App
+### 🚀 Terminal-First Console (Port 5006)
 
-If you want to deploy **only the terminal** — without the chat, notes, settings
-or admin APIs — build and run the dedicated app:
+Port **5005** keeps **Chat** as its landing page. Port **5006** serves the same
+full console but lands on **Terminal** — with the sidebar available for Chat,
+Sessions, Dashboard, Bookmarks, Notes, Diary and Settings.
 
 ```bash
 make terminal-app
 # -> http://localhost:5006/  (or first free port above 5006)
 ```
 
-This is the same terminal UI and the same Docker sandbox as the Terminal tab in
-the full console, but it is served by a separate FastAPI application
-(`core/terminal_app.py`) that exposes only:
+Both ports use the same frontend build and the same APIs; only the landing route
+is injected by the server through `COLLIG_LANDING_VIEW`.
 
-- `GET /health`
-- `/api/terminal/bootstrap`, `/api/terminal/sessions`, `/api/terminal/ws`
-- `/api/terminal/llm/...` (used only by the sandbox relay)
-- the built terminal-only frontend in `frontend/dist-terminal`
+The sidebar is collapsible via the menu button in the app bar. On the Sessions
+page every session has two actions:
 
-`/api/chat`, `/api/config`, bookmarks, notes, skills and every other admin
-endpoint return 404 in this app. There is no CORS middleware, so the page and
-API are same-origin only.
+- **Web** — continue the conversation in the chat UI.
+- **Terminal** — resume that exact session in the sandboxed CLI.
+
+Resuming copies only the selected session JSON into the terminal's fresh HOME,
+starts the CLI with `--session <id>`, and syncs that one session back when the
+terminal closes. Other host sessions are never mounted into the sandbox.
 
 Useful targets and options:
 
 ```bash
-make terminal-app          # build frontend/dist-terminal and run in the foreground
+make terminal-app          # build the full SPA and run the terminal-first app
 make terminal-app-status   # show the port/PID
 make terminal-app-stop     # stop the process from ~/.collig/terminal-app.port
 TERMINAL_PORT=8080 make terminal-app
@@ -255,26 +255,27 @@ For a service manager or container deployment, run uvicorn directly:
 
 ```bash
 export COLLIG_TERMINAL_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
-export COLLIG_TERMINAL_PROXY_PORT=5006   # internal port the sandbox relay calls
-uv run uvicorn core.terminal_app:app --host 0.0.0.0 --port 5006
+export COLLIG_TERMINAL_PROXY_PORT=5006
+export COLLIG_LANDING_VIEW=terminal
+uv run uvicorn core.main:app --host 0.0.0.0 --port 5006
 ```
 
 For a shared/server deployment:
 
 1. Set `COLLIG_TERMINAL_TOKEN` to a strong secret. Without it, only a loopback
    browser can bootstrap the generated token; remote users cannot obtain it.
-2. Put the app behind HTTPS and your SSO/reverse-proxy auth. The token is a
-   bearer credential.
-3. Make sure Docker is available to the service account and
-   `collig-terminal:latest` has been built with `make terminal-image`.
+2. Put the app behind HTTPS and your SSO/reverse-proxy auth; this is the full
+   console, not a reduced API surface.
+3. Make sure Docker is available and `collig-terminal:latest` has been built
+   with `make terminal-image` after terminal code changes.
 4. Serve it at the root of a hostname (for example `terminal.example.com`).
-   The terminal-only Vite build assumes `/` as the base path.
 5. If a reverse proxy terminates TLS, set `COLLIG_TERMINAL_PROXY_PORT` to the
    internal uvicorn port (for example `5006`) and either preserve the public
    `Host` header or add the public origin to `COLLIG_TERMINAL_ALLOWED_ORIGINS`.
 
-The build output is `frontend/dist-terminal`; override the served directory
-with `COLLIG_TERMINAL_DIST` if needed.
+`core.terminal_app` remains available as an optional terminal-only FastAPI app
+for deployments that intentionally want no chat/admin routes; `make terminal-app`
+now runs the full terminal-first console instead.
 
 ### Managing Sessions
 List previous chat sessions:
@@ -285,6 +286,11 @@ Resume a session:
 ```bash
 make pa session=<SESSION_ID>
 ```
+
+In the web UI, each row on the Sessions page has two actions: **Web** opens
+`/chat/<id>`, and **Terminal** opens `/terminal?session=<id>` so the same chat
+session is seeded into a sandboxed CLI. Only that session is copied into the
+terminal HOME and synced back when the terminal closes.
 
 ## 🧠 Memory & Personalities
 

@@ -54,11 +54,11 @@ help:
 	@echo "  make console-stop  - Stop Collig web (reads port from $(CONSOLE_PORT_FILE))"
 	@echo "  make console-status- Check Collig web status"
 	@echo "  make terminal-image- Build the isolated Docker image used by the web terminal"
-	@echo "  make terminal-app  - Build + start the standalone terminal-only web app"
+	@echo "  make terminal-app  - Build + start the terminal-first console (Terminal landing + sidebar)"
 	@echo "                         Runs on $(TERMINAL_PREFERRED) or first free port above."
 	@echo "                         Override with: TERMINAL_PORT=5007 make terminal-app"
-	@echo "  make terminal-app-stop  - Stop the standalone terminal app"
-	@echo "  make terminal-app-status- Check standalone terminal app status"
+	@echo "  make terminal-app-stop  - Stop the terminal-first console"
+	@echo "  make terminal-app-status- Check terminal-first console status"
 	@echo "  make push-personas personality=<path> - Open a PR against cloudrevel-lab/collig-personas"
 
 install:
@@ -242,9 +242,9 @@ console-status:
 	fi
 
 # ─── Standalone terminal-only web app ──────────────────────────────────────
-# Serves only the Terminal page and /api/terminal/* (plus /health) from
-# frontend/dist-terminal.  Use this for a server that should not expose the
-# chat/admin console at all.
+# Serves the full console SPA with the Terminal as its landing route and
+# the sidebar available for chat, sessions, notes, bookmarks, etc.  Port 5005
+# keeps Chat as its landing route; both use the same build.
 
 push-personas:
 	@if [ -z "$(personality)" ]; then \
@@ -254,7 +254,7 @@ push-personas:
 	uv run python scripts/push_persona.py --personality "$(personality)"
 
 terminal-app-build:
-	cd frontend && npm run build:terminal
+	cd frontend && npm run build
 
 terminal-app: terminal-app-build
 	@mkdir -p ~/.collig
@@ -268,16 +268,15 @@ terminal-app: terminal-app-build
 		TP=$(call resolve_port,$(TERMINAL_PREFERRED)); \
 	fi; \
 	echo ""; \
-	echo "● Starting Collig Terminal (standalone)"; \
-	echo "  UI:  http://localhost:$$TP/"; \
-	echo "  API: http://localhost:$$TP/api/terminal/*"; \
-	echo "  Only the terminal surface is exposed (no chat/config/admin APIs)."; \
+	echo "● Starting Collig Terminal-first console"; \
+	echo "  UI:  http://localhost:$$TP/   (Terminal landing + full sidebar)"; \
+	echo "  API: http://localhost:$$TP/api/*"; \
 	if [ -z "$$COLLIG_TERMINAL_TOKEN" ]; then \
 		echo "  Token: COLLIG_TERMINAL_TOKEN is not set."; \
 		echo "         Loopback pages can bootstrap; set it for remote users."; \
 	fi; \
 	echo $$TP > $(TERMINAL_PORT_FILE); \
-	COLLIG_TERMINAL_PROXY_PORT=$$TP uv run uvicorn core.terminal_app:app --host 0.0.0.0 --port $$TP
+	COLLIG_LANDING_VIEW=terminal COLLIG_TERMINAL_PROXY_PORT=$$TP uv run uvicorn core.main:app --host 0.0.0.0 --port $$TP
 
 terminal-app-stop:
 	@if [ -f $(TERMINAL_PORT_FILE) ]; then \

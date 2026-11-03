@@ -57,7 +57,9 @@
       </template>
 
       <template v-slot:item.preview="{ item }">
-        <div class="text-truncate" style="max-width: 350px;">{{ item.preview || '—' }}</div>
+        <div class="text-truncate session-preview" style="max-width: 350px;" title="Preview session" @click="viewSession(item)">
+          {{ item.preview || '—' }}
+        </div>
       </template>
 
       <template v-slot:item.message_count="{ item }">
@@ -77,11 +79,15 @@
       </template>
 
       <template v-slot:item.actions="{ item }">
-        <v-btn size="small" variant="flat" color="primary" prepend-icon="mdi-chat" class="mr-1" @click="continueSession(item)">
-          Continue
-        </v-btn>
-        <v-icon size="small" class="mr-2" color="info" @click="viewSession(item)">mdi-eye</v-icon>
-        <v-icon size="small" color="error" @click="confirmDelete(item)">mdi-delete</v-icon>
+        <div class="session-actions">
+          <v-btn size="small" variant="flat" color="primary" @click="openInWeb(item)">
+            Web
+          </v-btn>
+          <v-btn size="small" variant="tonal" color="secondary" @click="openInTerminal(item)">
+            Terminal
+          </v-btn>
+          <v-icon size="small" color="error" title="Delete session" @click="confirmDelete(item)">mdi-delete</v-icon>
+        </div>
       </template>
     </v-data-table>
 
@@ -93,9 +99,12 @@
             <v-col>
               Session {{ viewingSession?.id?.substring(0, 8) }}...
             </v-col>
-            <v-col cols="auto">
-              <v-btn color="primary" size="small" prepend-icon="mdi-chat" @click="continueFromView">
-                Continue this session
+            <v-col cols="auto" class="d-flex gap-2">
+              <v-btn color="primary" size="small" prepend-icon="mdi-chat" @click="openWebFromView">
+                Open in Web
+              </v-btn>
+              <v-btn color="secondary" size="small" variant="tonal" prepend-icon="mdi-console" @click="openTerminalFromView">
+                Open in Terminal
               </v-btn>
             </v-col>
           </v-row>
@@ -163,13 +172,13 @@ const viewingSession = ref(null)
 const deleteItem = ref(null)
 
 const headers = [
-  { title: 'Session ID', key: 'id', width: '15%' },
-  { title: 'Preview', key: 'preview', width: '30%' },
+  { title: 'Session ID', key: 'id', width: '14%' },
+  { title: 'Preview', key: 'preview', width: '25%' },
   { title: 'Messages', key: 'message_count', width: '8%' },
-  { title: 'U / A', key: 'user_messages', width: '10%', sortable: false },
-  { title: 'Created', key: 'created_at', width: '12%' },
+  { title: 'U / A', key: 'user_messages', width: '9%', sortable: false },
+  { title: 'Created', key: 'created_at', width: '11%' },
   { title: 'Last Activity', key: 'last_activity', width: '12%' },
-  { title: 'Actions', key: 'actions', sortable: false, width: '13%' },
+  { title: 'Actions', key: 'actions', sortable: false, width: '20%' },
 ]
 
 const filteredSessions = computed(() => {
@@ -205,14 +214,25 @@ async function viewSession(item) {
   }
 }
 
-function continueSession(item) {
+function openInWeb(item) {
   router.push(`/chat/${item.id}`)
 }
 
-function continueFromView() {
+function openInTerminal(item) {
+  router.push({ path: '/terminal', query: { session: item.id } })
+}
+
+function openWebFromView() {
   if (viewingSession.value?.id) {
     viewDialog.value = false
     router.push(`/chat/${viewingSession.value.id}`)
+  }
+}
+
+function openTerminalFromView() {
+  if (viewingSession.value?.id) {
+    viewDialog.value = false
+    router.push({ path: '/terminal', query: { session: viewingSession.value.id } })
   }
 }
 
@@ -271,6 +291,21 @@ onMounted(loadSessions)
 .session-id {
   font-size: 0.85rem;
   color: rgba(var(--v-theme-on-surface), 0.7);
+}
+
+.session-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: nowrap;
+}
+
+.session-preview {
+  cursor: pointer;
+}
+
+.session-preview:hover {
+  color: rgb(var(--v-theme-primary));
 }
 
 .session-messages {

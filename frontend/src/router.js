@@ -7,8 +7,12 @@ import ChatView from './views/ChatView.vue'
 import SessionsView from './views/SessionsView.vue'
 import TerminalView from './views/TerminalView.vue'
 
+// Port 5005 keeps Chat as its landing view; port 5006 injects
+// __COLLIG_LANDING_VIEW__ = 'terminal' so the same SPA lands on the terminal.
+const landingView = window.__COLLIG_LANDING_VIEW__ === 'terminal' ? '/terminal' : '/chat'
+
 const routes = [
-  { path: '/', redirect: '/chat' },
+  { path: '/', redirect: landingView },
   { path: '/chat/:sessionId?', name: 'Chat', component: ChatView, props: true },
   { path: '/terminal', name: 'Terminal', component: TerminalView },
   { path: '/dashboard', name: 'Dashboard', component: DashboardView },

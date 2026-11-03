@@ -578,8 +578,13 @@ class AgentService:
         return migrated
 
     def _legacy_event(self, session_id: str, message: Dict[str, Any]) -> Event:
-        """Turn one stored JSON message into an ADK event."""
-        self._ensure_runner()
+        """Turn one stored JSON message into an ADK event.
+
+        The caller is migrate_legacy_sessions(), which already runs from inside
+        _ensure_runner() after app_name is assigned.  Re-entering the runner
+        lock here deadlocked the first run on a fresh HOME (a resumed terminal
+        session has a session file but no migration marker).
+        """
         role = message.get("role", "user")
         author = "user" if role == "user" else self.app_name
         content = types.Content(

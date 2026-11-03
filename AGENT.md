@@ -25,8 +25,8 @@ All common tasks are driven through the **Makefile** (run `make help` to list th
 | `make console-stop` | Stop the admin console |
 | `make console-status` | Check whether the admin console is running |
 | `make terminal-image` | Build the Docker image used by the browser terminal (one-time) |
-| `make terminal-app` | Build + run the standalone terminal-only web app on :5006 |
-| `make terminal-app-stop` / `terminal-app-status` | Stop / inspect the standalone terminal app |
+| `make terminal-app` | Build + run the full terminal-first console on :5006 (Terminal landing + sidebar) |
+| `make terminal-app-stop` / `terminal-app-status` | Stop / inspect the terminal-first console |
 | `make push-personas personality=<path>` | Validate a persona and open a PR against cloudrevel-lab/collig-personas |
 | `make test` | Run the harness/router/config and provider round-trip tests |
 | `make lint` | Run isort + black + flake8 (max line length 120) |
@@ -255,21 +255,23 @@ The **Terminal** page (/terminal in the SPA) is a real xterm.js PTY, not a chat
 facade. core/terminal.py owns access control, session lifecycle and the sandbox;
 core/terminal_routes.py exposes the shared HTTP/WebSocket routes and the
 host-side LLM proxy; terminal/relay.py is the only process the sandbox can
-reach. core/main.py includes that router for the full console, while
-core/terminal_app.py serves the same router plus frontend/dist-terminal and
-nothing else for the standalone deployment. Keep the router shared: the
-standalone app must never grow /api/chat, /api/config or other admin routes.
+reach. core/main.py includes that router for the full console.
 
-Build the standalone UI with "cd frontend && npm run build:terminal" (or
-"make terminal-app"). terminal.html + src/main-terminal.js reuse TerminalView
-and src/vuetify.js, but emit a terminal-only bundle. The standalone app assumes
-a root base path; serve it on its own hostname/subdomain.
+Port 5005 and port 5006 both run core.main. The server injects
+COLLIG_LANDING_VIEW into index.html; 5005 defaults to Chat, while
+make terminal-app sets terminal so the same SPA lands on /terminal with the
+normal sidebar. core/terminal_app.py remains an optional terminal-only app
+(no /api/chat or admin routes); core/main.py is the terminal-first console.
 
-The terminal card has viewport snap modes (normal, maximize, left/right/bottom
-half) controlled from its title bar. The active icon and the mode label indicate
-the current state; the choice is persisted in localStorage. If you change the
-card/terminal-host CSS, call fitAddon.fit() after the layout settles (setWindowMode
-already does two passes) so xterm does not keep the previous row/column size.
+Build the normal SPA with "cd frontend && npm run build". The optional
+terminal-only bundle is "npm run build:terminal" (terminal.html +
+src/main-terminal.js). The terminal-only app assumes a root base path.
+
+Resuming a web session: SessionsView pushes /terminal?session=<id>;
+TerminalView reads the hash query and sends session_id when creating the
+terminal session. TerminalManager copies only that host session JSON into the
+sandbox, builds the CLI with --session, and syncs just that session back on
+cleanup. Tests cover seeding, --session, invalid ids and sync-back.
 
 The terminal has its own Vuetify theme names (colligTerminalDark/Light) supplied
 through v-theme-provider around the card. Default is dark and the choice is

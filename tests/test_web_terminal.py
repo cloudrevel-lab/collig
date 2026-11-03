@@ -30,6 +30,7 @@ def check(name, cond, detail=""):
 
 
 from core.terminal import (  # noqa: E402
+    TerminalError,
     TerminalManager,
     TerminalSettings,
     _origin_matches,
@@ -48,6 +49,7 @@ settings = TerminalSettings(
     proxy_port=5555,
     max_sessions=2,
     ticket_ttl=30,
+    session_store_dir=TMP / "host-sessions",
 )
 mgr = TerminalManager(settings)
 mgr._docker = lambda: None  # never touch a real Docker daemon in this test
@@ -114,6 +116,48 @@ check("expired ticket is rejected", mgr.consume_ticket(second["ticket"]) is None
 ticket3 = mgr.issue_ticket(sid)["ticket"]
 check("session accepts its first websocket", mgr.mark_connected(session))
 check("second websocket for the same session is rejected", not mgr.mark_connected(session))
+
+# ---------------------------------------------------------------------------
+# Resuming a web-chat session inside the terminal
+# ---------------------------------------------------------------------------
+host_sessions = TMP / "host-sessions"
+host_sessions.mkdir(parents=True, exist_ok=True)
+chat_session_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+host_file = host_sessions / (chat_session_id + ".json")
+host_file.write_text(
+    json.dumps({"id": chat_session_id, "messages": [{"role": "user", "content": "hello"}]}),
+    encoding="utf-8",
+)
+resumed = mgr.create_session(proxy_port=5555, requested_session_id=chat_session_id)
+resumed_session = mgr.get_session(resumed["session_id"])
+check("terminal session reports the resumed chat id", resumed.get("chat_session_id") == chat_session_id)
+check(
+    "selected chat session is seeded into sandbox",
+    (resumed_session.home / ".collig" / "sessions" / (chat_session_id + ".json")).is_file(),
+)
+resumed_cmd = mgr.build_terminal_command(resumed_session) if mgr._docker() else None
+if resumed_cmd is None:
+    previous = mgr._docker
+    mgr._docker = lambda: "/usr/bin/docker"
+    resumed_cmd = mgr.build_terminal_command(resumed_session)
+    mgr._docker = previous
+check("resumed session is passed to the CLI", "--session" in resumed_cmd and chat_session_id in resumed_cmd)
+# Simulate the CLI appending a turn, then verify cleanup syncs it back only for
+# this selected session.
+sandbox_file = resumed_session.home / ".collig" / "sessions" / (chat_session_id + ".json")
+sandbox_file.write_text(
+    json.dumps(
+        {"id": chat_session_id, "messages": [{"role": "user", "content": "hello"}, {"role": "ai", "content": "hi"}]}
+    ),
+    encoding="utf-8",
+)
+mgr.cleanup(resumed_session)
+check("resumed session is synced back to host", "hi" in host_file.read_text(encoding="utf-8"))
+try:
+    mgr.create_session(proxy_port=5555, requested_session_id="../escape")
+    check("invalid resumed session id is rejected", False)
+except TerminalError:
+    check("invalid resumed session id is rejected", True)
 
 # ---------------------------------------------------------------------------
 # Docker command is the actual security boundary
