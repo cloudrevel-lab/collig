@@ -68,7 +68,7 @@
             >
               <div class="message-header">
                 <span class="message-role">
-                  {{ msg.role === 'user' ? 'You' : 'Collig' }}
+                  {{ msg.role === 'user' ? 'You' : (msg.label || botLabel) }}
                 </span>
                 <span v-if="msg.timestamp" class="message-time">{{ formatTimestamp(msg.timestamp) }}</span>
                 <v-btn
@@ -111,7 +111,7 @@
 
             <div v-if="loading" class="message-bubble ai">
               <div class="message-header">
-                <span class="message-role">Collig</span>
+                <span class="message-role">{{ botLabel }}</span>
               </div>
               <div class="message-content">
                 <v-progress-circular indeterminate size="20" width="2" color="primary" />
@@ -873,6 +873,8 @@ const messages = ref([])
 const messageTraces = ref({}) // index -> trace object
 const input = ref('')
 const loading = ref(false)
+// "Collig" or "Collig (曹操)" while a personality is active.
+const botLabel = ref('Collig')
 const messagesContainer = ref(null)
 const llmProvider = ref('')
 const currentSessionId = ref(null)
@@ -1076,12 +1078,15 @@ async function sendMessage() {
       throw new Error('Invalid response from server (expected JSON)')
     }
 
+    if (data.label) botLabel.value = data.label
+
     const aiMsg = {
       role: 'ai',
       content: data.response || 'No response received.',
       timestamp: new Date().toISOString(),
       invocation_id: null,
       hasTrace: false,
+      label: data.label || botLabel.value,
     }
     if (data.total_tokens) {
       aiMsg.tokens = {
@@ -1187,10 +1192,20 @@ function detectProvider() {
     .catch(() => { llmProvider.value = 'AI Assistant' })
 }
 
+async function loadPersonaLabel() {
+  try {
+    const res = await fetch(`${API_BASE}/personalities`)
+    if (!res.ok) return
+    const data = await res.json()
+    if (data?.label) botLabel.value = data.label
+  } catch {}
+}
+
 onMounted(async () => {
   const sid = route.params.sessionId
   if (sid) currentSessionId.value = sid
   detectProvider()
+  loadPersonaLabel()
   await loadSessionHistory()
   await loadTraces()
   await loadSessionStats()

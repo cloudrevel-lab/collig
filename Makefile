@@ -1,4 +1,4 @@
-.PHONY: help install up down dev core frontend pa list-sessions lint console-start console-stop console-status console-build
+.PHONY: help install up down dev core frontend pa list-sessions lint console-start console-stop console-status console-build terminal-image terminal-app terminal-app-build terminal-app-stop terminal-app-status push-personas
 
 # ─── Port helpers (macOS / Linux via lsof) ─────────────────────────────────────
 # These helpers try the preferred port first; if occupied, scan upward up to 100 ports.
@@ -20,11 +20,13 @@ find_free_port = $(shell \
 	echo $$p)
 
 CONSOLE_PORT_FILE := ~/.collig/console.port
+TERMINAL_PORT_FILE := ~/.collig/terminal-app.port
 DEV_PORTS_FILE := ~/.collig/dev.ports
 
 CORE_PREFERRED ?= 8000
 VITE_PREFERRED ?= 5173
 CONSOLE_PREFERRED ?= 5005
+TERMINAL_PREFERRED ?= 5006
 
 # If env override is set and free, use it; otherwise pick a free one near preferred.
 define resolve_port
@@ -51,6 +53,13 @@ help:
 	@echo "                         Override with: CONSOLE_PORT=5006 make console-start"
 	@echo "  make console-stop  - Stop Collig web (reads port from $(CONSOLE_PORT_FILE))"
 	@echo "  make console-status- Check Collig web status"
+	@echo "  make terminal-image- Build the isolated Docker image used by the web terminal"
+	@echo "  make terminal-app  - Build + start the standalone terminal-only web app"
+	@echo "                         Runs on $(TERMINAL_PREFERRED) or first free port above."
+	@echo "                         Override with: TERMINAL_PORT=5007 make terminal-app"
+	@echo "  make terminal-app-stop  - Stop the standalone terminal app"
+	@echo "  make terminal-app-status- Check standalone terminal app status"
+	@echo "  make push-personas personality=<path> - Open a PR against cloudrevel-lab/collig-personas"
 
 install:
 	uv sync
@@ -99,7 +108,20 @@ list-sessions:
 
 test:
 	uv run python tests/test_harness.py
+	uv run python tests/test_flight_skill.py
 	uv run python tests/test_llm_config_menu.py
+	uv run python tests/test_cli_completion.py
+	uv run python tests/test_news_menu.py
+	uv run python tests/test_news_autoopen.py
+	uv run python tests/test_user_memory.py
+	uv run python tests/test_notes_store.py
+	uv run python tests/test_personality.py
+	uv run python tests/test_tool_fallback.py
+	uv run python tests/test_web_terminal.py
+	uv run python tests/test_terminal_app.py
+	uv run python tests/test_persona_market.py
+	uv run python tests/test_push_persona.py
+	uv run python tests/test_terminal_app.py
 
 lint:
 	uv run isort --check-only --diff skills/lunar_calendar/__init__.py
@@ -117,6 +139,7 @@ up:
 	 echo ""; \
 	 mkdir -p ~/.collig; \
 	 printf "core=%s\nvite=%s\n" $$CORE_PORT_USE $$VITE_PORT_USE > $(DEV_PORTS_FILE); \
+	 COLLIG_TERMINAL_ALLOWED_ORIGINS="http://localhost:$$VITE_PORT_USE,http://127.0.0.1:$$VITE_PORT_USE" \
 	 $(MAKE) -j 2 _core_with_port CORE_PORT_RUN=$$CORE_PORT_USE _frontend_with_port VITE_PORT_RUN=$$VITE_PORT_USE CORE_PORT_RUN=$$CORE_PORT_USE
 
 _core_with_port:
@@ -152,6 +175,10 @@ down:
 	fi
 
 # ─── Collig Web (single server, built SPA served from FastAPI) ──────────────
+
+terminal-image:
+	@echo "Building terminal sandbox image (one-time, then cached)..."
+	docker build -f terminal/Dockerfile -t $${COLLIG_TERMINAL_IMAGE:-collig-terminal:latest} .
 
 console-build:
 	cd frontend && npm run build
@@ -211,5 +238,73 @@ console-status:
 			lsof -ti:$(CONSOLE_PREFERRED); \
 		else \
 			echo "○ Collig web is not running"; \
+		fi; \
+	fi
+
+# ─── Standalone terminal-only web app ──────────────────────────────────────
+# Serves only the Terminal page and /api/terminal/* (plus /health) from
+# frontend/dist-terminal.  Use this for a server that should not expose the
+# chat/admin console at all.
+
+push-personas:
+	@if [ -z "$(personality)" ]; then \
+		echo "Usage: make push-personas personality=~/.collig/personalities/<name>"; \
+		exit 2; \
+	fi
+	uv run python scripts/push_persona.py --personality "$(personality)"
+
+terminal-app-build:
+	cd frontend && npm run build:terminal
+
+terminal-app: terminal-app-build
+	@mkdir -p ~/.collig
+	@if [ -n "$$TERMINAL_PORT" ]; then \
+		TP=$$TERMINAL_PORT; \
+		if lsof -iTCP:$$TP -sTCP:LISTEN -t >/dev/null 2>&1; then \
+			echo "TERMINAL_PORT $$TP is in use — picking a free port near $(TERMINAL_PREFERRED)"; \
+			TP=$(call find_free_port,$(TERMINAL_PREFERRED)); \
+		fi; \
+	else \
+		TP=$(call resolve_port,$(TERMINAL_PREFERRED)); \
+	fi; \
+	echo ""; \
+	echo "● Starting Collig Terminal (standalone)"; \
+	echo "  UI:  http://localhost:$$TP/"; \
+	echo "  API: http://localhost:$$TP/api/terminal/*"; \
+	echo "  Only the terminal surface is exposed (no chat/config/admin APIs)."; \
+	if [ -z "$$COLLIG_TERMINAL_TOKEN" ]; then \
+		echo "  Token: COLLIG_TERMINAL_TOKEN is not set."; \
+		echo "         Loopback pages can bootstrap; set it for remote users."; \
+	fi; \
+	echo $$TP > $(TERMINAL_PORT_FILE); \
+	COLLIG_TERMINAL_PROXY_PORT=$$TP uv run uvicorn core.terminal_app:app --host 0.0.0.0 --port $$TP
+
+terminal-app-stop:
+	@if [ -f $(TERMINAL_PORT_FILE) ]; then \
+		TP=$$(cat $(TERMINAL_PORT_FILE)); \
+		echo "Killing Collig Terminal on port $$TP..."; \
+		lsof -tiTCP:$$TP -sTCP:LISTEN | xargs -r kill 2>/dev/null || echo "No process listening on port $$TP"; \
+		rm -f $(TERMINAL_PORT_FILE); \
+	else \
+		echo "No $(TERMINAL_PORT_FILE) — trying default port $(TERMINAL_PREFERRED)"; \
+		lsof -tiTCP:$(TERMINAL_PREFERRED) -sTCP:LISTEN | xargs -r kill 2>/dev/null || echo "No terminal app listening on port $(TERMINAL_PREFERRED)"; \
+	fi
+	@echo "Collig Terminal stopped."
+
+terminal-app-status:
+	@if [ -f $(TERMINAL_PORT_FILE) ]; then \
+		TP=$$(cat $(TERMINAL_PORT_FILE)); \
+		if lsof -tiTCP:$$TP -sTCP:LISTEN > /dev/null 2>&1; then \
+			echo "● Collig Terminal is running: http://localhost:$$TP/  (port stored in $(TERMINAL_PORT_FILE))"; \
+			lsof -tiTCP:$$TP -sTCP:LISTEN; \
+		else \
+			echo "○ Collig Terminal is NOT running (port file says $$TP but nothing is listening)"; \
+		fi; \
+	else \
+		if lsof -tiTCP:$(TERMINAL_PREFERRED) -sTCP:LISTEN > /dev/null 2>&1; then \
+			echo "● Collig Terminal is running on default port: http://localhost:$(TERMINAL_PREFERRED)/"; \
+			lsof -tiTCP:$(TERMINAL_PREFERRED) -sTCP:LISTEN; \
+		else \
+			echo "○ Collig Terminal is not running"; \
 		fi; \
 	fi

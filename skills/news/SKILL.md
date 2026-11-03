@@ -28,6 +28,11 @@ triggers:
   - headlines
   - current events
   - search news
+  - news item
+  - read news
+  - article
+  - cached news
+  - news list
 ---
 
 # News Search Skill

@@ -3,7 +3,9 @@ import shutil
 
 class Paths:
     def __init__(self):
-        self.home = os.path.expanduser("~/.collig")
+        # COLLIG_HOME lets the web terminal give every sandbox its own
+        # profile without inheriting the operator's ~/.collig data.
+        self.home = os.path.expanduser(os.environ.get("COLLIG_HOME") or "~/.collig")
         self.config_dir = os.path.join(self.home, "configs")
         self.data_dir = os.path.join(self.home, "data")
         self.storage_dir = os.path.join(self.home, "storage")

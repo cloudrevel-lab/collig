@@ -49,6 +49,7 @@ const { toggleTheme, isDark } = useThemeToggle()
 
 const menuItems = [
   { title: 'Chat', icon: 'mdi-chat', route: '/chat' },
+  { title: 'Terminal', icon: 'mdi-console', route: '/terminal' },
   { title: 'Dashboard', icon: 'mdi-view-dashboard', route: '/dashboard' },
   { title: 'Sessions', icon: 'mdi-format-list-bulleted', route: '/sessions' },
   { title: 'Bookmarks', icon: 'mdi-bookmark', route: '/bookmarks' },

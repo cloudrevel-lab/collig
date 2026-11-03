@@ -52,6 +52,7 @@ Usage instructions, examples, and notes.
 | Skill | Description |
 |-------|-------------|
 | **Weather Reporter** | Current weather and forecasts using Open-Meteo API |
+| **Flight Search** | Live flight fares and itineraries with airline, stops and duration (Google Flights, no key) |
 | **Git Version Control** | Git repository management (status, add, commit, push, diff, log) |
 | **File System Manager** | File and directory operations (create, list, delete, read, write) |
 | **Email Manager** | Email management via IMAP/SMTP with semantic search |

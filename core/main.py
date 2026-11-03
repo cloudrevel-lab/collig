@@ -40,6 +40,8 @@ from core.runtime import (
 from core.trace_manager import get_trace_manager
 from core.session import SessionManager
 from core.runner import get_agent
+from core.terminal_routes import router as terminal_router
+from skills.memory import note_warning
 
 # ---------------------------------------------------------------------------
 # Lightweight helpers that never require the full AgentService / ADK DB
@@ -283,26 +285,12 @@ def _get_all_bookmarks():
 
 def _get_all_notes():
     skill = _get_memory_skill()
-    if not skill or not getattr(skill, "vectorstore", None):
+    if not skill:
         return []
     try:
-        collection = skill.vectorstore._collection
-        data = collection.get(include=["documents", "metadatas"])
-        docs = data.get("documents", [])
-        metas = data.get("metadatas", [])
-        ids = data.get("ids", [])
-        results = []
-        for d, m, i in zip(docs, metas, ids):
-            results.append(
-                {
-                    "id": i,
-                    "content": d,
-                    "timestamp": m.get("timestamp", ""),
-                }
-            )
-        results.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
-        return results
+        return skill.recent_notes()
     except Exception:
+        # A note file that cannot be read should not take down the dashboard.
         return []
 
 
@@ -360,6 +348,8 @@ class _ChatResponsePydantic(BaseModel):
     completion_tokens: Optional[int] = None
     total_tokens: Optional[int] = None
     session_id: Optional[str] = None
+    # "Collig" or "Collig (曹操)": the name to show above this reply.
+    label: Optional[str] = None
 
 
 @_app.post("/api/chat", response_model=_ChatResponsePydantic)
@@ -385,6 +375,13 @@ def chat_endpoint(request: _ChatRequestPydantic):
                 "type": type(e).__name__,
             },
         )
+    label = "Collig"
+    try:
+        from core.personality import get_personality_manager
+
+        label = get_personality_manager().speaker_label()
+    except Exception:
+        pass
     return _ChatResponsePydantic(
         response=result.get("response", ""),
         action=result.get("action"),
@@ -392,6 +389,7 @@ def chat_endpoint(request: _ChatRequestPydantic):
         completion_tokens=result.get("completion_tokens"),
         total_tokens=result.get("total_tokens"),
         session_id=result.get("session_id") or request.session_id,
+        label=label,
     )
 
 
@@ -1099,6 +1097,127 @@ def toggle_skill(toggle: _SkillToggle):
 
 
 # ---------------------------------------------------------------------------
+# User memory & personalities
+# ---------------------------------------------------------------------------
+
+
+@_app.get("/api/memory")
+def get_user_memory_profile():
+    """What Collig remembers about the user (the same data as ``/memory``)."""
+    from core.user_memory import get_user_memory
+
+    store = get_user_memory()
+    return {
+        "enabled": store.enabled(),
+        "proactive": store.proactive_enabled(),
+        "summary": store.summary(),
+        "facts": store.list_facts(),
+        "profile_path": str(store.profile_path),
+        "markdown_path": str(store.markdown_path),
+    }
+
+
+class _MemoryForget(BaseModel):
+    key: str
+
+
+@_app.post("/api/memory/forget")
+def forget_user_memory(request: _MemoryForget):
+    from core.user_memory import get_user_memory
+
+    if get_user_memory().forget(request.key):
+        return {"message": f"Forgotten: {request.key}"}
+    raise HTTPException(status_code=404, detail=f"No remembered fact '{request.key}'")
+
+
+@_app.post("/api/memory/clear")
+def clear_user_memory():
+    from core.user_memory import get_user_memory
+
+    get_user_memory().clear()
+    return {"message": "User memory cleared"}
+
+
+@_app.get("/api/personalities")
+def list_personalities():
+    """Distilled personalities plus the currently active one."""
+    from core.personality import get_personality_manager
+
+    manager = get_personality_manager()
+    return {
+        "personalities": manager.list(),
+        "active": manager.current(),
+        "label": manager.speaker_label(),
+    }
+
+
+class _DistillRequest(BaseModel):
+    name: str
+    force: bool = False
+    pick: Optional[int] = None
+    intent: Optional[str] = None
+
+
+@_app.post("/api/personalities/distill")
+def distill_personality(request: _DistillRequest):
+    """Build a personality folder from web resources plus the configured model.
+
+    An ambiguous name returns 200 with ``needs_choice`` and the candidates; the
+    caller repeats the request with ``pick`` set to the 1-based choice.
+    ``intent`` is the user's reason for distilling this person; when omitted
+    the model infers it.
+    """
+    from core.personality import get_personality_manager
+
+    result = get_personality_manager().distill(
+        request.name,
+        force=request.force,
+        pick=request.pick,
+        intent=request.intent,
+    )
+    if result.get("needs_choice"):
+        return result
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("message"))
+    return result
+
+
+class _PersonalityName(BaseModel):
+    name: str
+
+
+@_app.post("/api/personalities/activate")
+def activate_personality(request: _PersonalityName):
+    from core.personality import get_personality_manager
+
+    result = get_personality_manager().activate(request.name)
+    if result.get("needs_choice"):
+        return result
+    if not result.get("ok"):
+        raise HTTPException(status_code=404, detail=result.get("message"))
+    return result
+
+
+@_app.post("/api/personalities/deactivate")
+def deactivate_personality():
+    from core.personality import get_personality_manager
+
+    return get_personality_manager().deactivate()
+
+
+@_app.post("/api/personalities/delete")
+def delete_personality(request: _PersonalityName):
+    from core.personality import get_personality_manager
+
+    result = get_personality_manager().delete(request.name)
+    if result.get("needs_choice"):
+        return result
+    if not result.get("ok"):
+        raise HTTPException(status_code=404, detail=result.get("message"))
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Token Statistics
 # ---------------------------------------------------------------------------
 
@@ -1287,48 +1406,54 @@ def list_notes():
 @_app.post("/api/notes", status_code=201)
 def create_note(note: _NoteCreate):
     skill = _get_memory_skill()
-    if not skill or not getattr(skill, "vectorstore", None):
-        raise HTTPException(status_code=503, detail="Memory system not initialized. Check OPENAI_API_KEY.")
+    if not skill:
+        raise HTTPException(status_code=503, detail="Memory system is not available.")
     try:
-        from langchain_core.documents import Document
-
-        meta = {"timestamp": datetime.datetime.now().isoformat(), "type": "user_note"}
-        skill.vectorstore.add_documents([Document(page_content=note.content, metadata=meta)])
-        return {"message": "Note created"}
+        result = skill.store_note(note.content)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Note content is empty.")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    payload = {"message": "Note created", "note": result.get("note")}
+    if result.get("warning"):
+        payload["warning"] = result["warning"]
+    return payload
 
 
 @_app.delete("/api/notes/{note_id}")
 def delete_note(note_id: str):
     skill = _get_memory_skill()
-    if not skill or not getattr(skill, "vectorstore", None):
-        raise HTTPException(status_code=503, detail="Memory system not initialized.")
+    if not skill:
+        raise HTTPException(status_code=503, detail="Memory system is not available.")
     try:
-        skill.vectorstore.delete(ids=[note_id])
-        return {"message": "Note deleted"}
+        removed = skill.remove_notes([note_id])
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    if not removed:
+        raise HTTPException(status_code=404, detail="Note not found")
+    return {"message": "Note deleted"}
 
 
 @_app.put("/api/notes/{note_id}")
 def update_note(note_id: str, note: _NoteUpdate):
     skill = _get_memory_skill()
-    if not skill or not getattr(skill, "vectorstore", None):
-        raise HTTPException(status_code=503, detail="Memory system not initialized.")
+    if not skill:
+        raise HTTPException(status_code=503, detail="Memory system is not available.")
+    if note.content is None:
+        raise HTTPException(status_code=400, detail="Note content is required.")
     try:
-        existing = skill.vectorstore._collection.get(ids=[note_id], include=["documents", "metadatas"])
-        if not existing.get("ids"):
-            raise HTTPException(status_code=404, detail="Note not found")
-        old_meta = existing["metadatas"][0]
-        new_content = note.content if note.content is not None else existing["documents"][0]
-        new_meta = {"timestamp": old_meta.get("timestamp", datetime.datetime.now().isoformat()), "type": "user_note"}
-        skill.vectorstore._collection.update(ids=[note_id], documents=[new_content], metadatas=[new_meta])
-        return {"message": "Note updated"}
-    except HTTPException:
-        raise
+        updated = skill.edit_note(note_id, note.content)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Note content is empty.")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Note not found")
+    payload = {"message": "Note updated", "note": updated}
+    warning = note_warning(updated["content"])
+    if warning:
+        payload["warning"] = warning
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -1398,6 +1523,16 @@ def update_diary_entry(entry_id: str, entry: _DiaryEntryUpdate):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Web Terminal (shared router)
+# ---------------------------------------------------------------------------
+#
+# The endpoints live in core/terminal_routes.py so the full admin console and
+# the standalone terminal-only deployment expose exactly the same security
+# checks.  Include it before the SPA catch-all below.
+_app.include_router(terminal_router)
 
 
 # ---------------------------------------------------------------------------

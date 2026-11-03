@@ -26,6 +26,7 @@ copies whatever they already hold into ADK.
 """
 import asyncio
 import json
+import logging
 import os
 import shutil
 import threading
@@ -55,6 +56,7 @@ from core.runtime import (
 from core.session import SessionManager
 
 console = Console()
+logger = logging.getLogger(__name__)
 
 # The CLI is single-user by definition, and the web GUI runs on localhost.
 USER_ID = "local"
@@ -253,6 +255,11 @@ class AgentService:
         self._runner = None
         self._loop = None
         self._known_sessions: Optional[set] = None
+        # session_id -> recent user messages (nearest first), so the thinking
+        # block can show the skills a follow-up keeps from the turns before
+        # (the model gets them from SkillToolset, which reads the ADK session
+        # directly).
+        self._last_user_messages: Dict[str, List[str]] = {}
         self.__runner_ensured = False
         self.__runner_lock = threading.Lock()
 
@@ -509,7 +516,12 @@ class AgentService:
            inside ``os.listdir`` scope (which happens for every file on the
            legacy path) waits 2 minutes per probe on some policy locks.
         """
-        self._ensure_runner()
+        # _ensure_runner() calls this method after assigning self._runner.
+        # Re-entering it from here would deadlock on the non-reentrant runner
+        # lock (and a fresh sandbox has no migration marker, so this path is
+        # hit on every first run).
+        if self._runner is None:
+            self._ensure_runner()
         if os.path.exists(MIGRATION_MARKER):
             return 0
 
@@ -592,7 +604,8 @@ class AgentService:
     # ------------------------------------------------------------------
 
     def _run_turn(self, message: str, session_id: str, verbose: bool,
-                  token_callback: Optional[Callable[[str, str], None]]) -> Dict[str, Any]:
+                  token_callback: Optional[Callable[[str, str], None]],
+                  capture_memory: bool = True) -> Dict[str, Any]:
         """Drive one invocation, rendering a structured thinking timeline.
 
         Uses ``google.adk.runners.Runner.run`` (the synchronous wrapper) rather
@@ -601,7 +614,7 @@ class AgentService:
         eliminate the double-event-loop nesting that previously deadlocked the
         FastAPI sync-threadpool worker on CPython 3.13.
         """
-        from core.harness import route_message
+        from core.harness import route_with_context
         from core.thinking import ThinkingBlock
 
         self._ensure_runner()
@@ -613,7 +626,10 @@ class AgentService:
         final_text = ""
         invocation_id = ""
         stream_started = False
-        route = route_message(message)
+        used_tools = set()
+        previous_messages = self._last_user_messages.get(session_id, [])
+        route = route_with_context(message, previous_message=previous_messages)
+        self._last_user_messages[session_id] = ([message] + previous_messages)[:3]
 
         display = ThinkingBlock(console, verbose)
         display.begin(message)
@@ -654,6 +670,8 @@ class AgentService:
                             target = args.get("agent_name") if isinstance(args, dict) else None
                             display.transfer(str(target or call.name))
                         else:
+                            if call.name:
+                                used_tools.add(str(call.name))
                             display.plan(call.name, args)
                             display.tool_start(call.name)
                     # Text emitted alongside a tool call is planning commentary,
@@ -693,6 +711,9 @@ class AgentService:
         if stream_started and token_callback:
             token_callback("", "end")
 
+        if capture_memory:
+            self._capture_memory_turn(message, final_text, previous_messages, used_tools)
+
         usage = self._token_plugin.usage_for(invocation_id)
         return {
             "response": final_text,
@@ -701,6 +722,53 @@ class AgentService:
             "completion_tokens": usage["completion_tokens"],
             "total_tokens": usage["total_tokens"],
         }
+
+    def _capture_memory_turn(
+        self,
+        message: str,
+        final_text: str,
+        previous_messages: List[str],
+        used_tools: set,
+    ) -> None:
+        """
+        Persist what this turn revealed about the user.
+
+        Deterministic facts are applied immediately; the LLM enrichment runs on
+        a daemon thread so a turn never waits on it.  Both are best-effort: a
+        memory problem must not make a normal answer fail.
+        """
+        try:
+            from core.user_memory import get_user_memory
+
+            memory = get_user_memory()
+
+            # Map tools that actually ran back to their skills.  Counting the
+            # routed skills instead would inflate routines with offered-but-
+            # unused tools (and every "ok" follow-up).
+            skills_used: List[str] = []
+            if used_tools:
+                for skill in get_skill_manager().skills:
+                    try:
+                        names = {str(item.get("name")) for item in skill.tool_metadata()}
+                    except Exception:
+                        continue
+                    if names & used_tools:
+                        skills_used.append(str(skill.name))
+            if skills_used:
+                memory.record_skill_usage(skills_used)
+
+            routine = memory.due_routine()
+            if routine and routine.get("skill") in skills_used:
+                memory.mark_proactive(str(routine.get("intent") or ""))
+
+            memory.capture_turn(
+                message,
+                final_text,
+                previous=previous_messages,
+                session_id=None,
+            )
+        except Exception:
+            logger.debug("Memory capture failed", exc_info=True)
 
     def process_message(self, message: str, session_id: Optional[str] = None,
                         include_history: bool = True,
@@ -738,14 +806,47 @@ class AgentService:
         scratch = session_id is None or not include_history
         run_session_id: Optional[str] = None
         try:
+            # Meta commands (/distill, /chatto, /memory) never need a model or
+            # a session.  Both the web chat and ``--prompt`` arrive here with
+            # the slash intact; the interactive CLI handles them itself.
+            if message.strip().startswith("/"):
+                from core.commands import handle_slash_command
+
+                command_output = handle_slash_command(message)
+                if command_output is not None:
+                    # Mirror the command and its result into the session so the
+                    # web history shows what happened, just like the CLI does.
+                    if not scratch and session_id:
+                        try:
+                            self._ensure_session(session_id)
+                            self.session_manager.add_message(session_id, "user", message)
+                            self.session_manager.add_message(session_id, "ai", command_output)
+                        except Exception:
+                            logger.debug("Could not persist meta command", exc_info=True)
+                    return {
+                        "response": command_output,
+                        "action": "command",
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                        "total_tokens": 0,
+                    }
+
             run_session_id = self._scratch_session() if scratch else session_id
             assert run_session_id is not None
+            # Per-conversation skills (news cache) read this.
+            os.environ["COLLIG_SESSION_ID"] = str(run_session_id)
 
             if not scratch:
                 self._ensure_session(run_session_id)
                 self.session_manager.add_message(run_session_id, "user", message)
 
-            result = self._run_turn(message, run_session_id, verbose, token_callback)
+            result = self._run_turn(
+                message,
+                run_session_id,
+                verbose,
+                token_callback,
+                capture_memory=not scratch,
+            )
         except KeyboardInterrupt:
             raise
         except Exception as e:

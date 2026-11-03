@@ -5,10 +5,12 @@ import NotesView from './views/NotesView.vue'
 import DiaryView from './views/DiaryView.vue'
 import ChatView from './views/ChatView.vue'
 import SessionsView from './views/SessionsView.vue'
+import TerminalView from './views/TerminalView.vue'
 
 const routes = [
   { path: '/', redirect: '/chat' },
   { path: '/chat/:sessionId?', name: 'Chat', component: ChatView, props: true },
+  { path: '/terminal', name: 'Terminal', component: TerminalView },
   { path: '/dashboard', name: 'Dashboard', component: DashboardView },
   { path: '/bookmarks', name: 'Bookmarks', component: BookmarksView },
   { path: '/notes', name: 'Notes', component: NotesView },

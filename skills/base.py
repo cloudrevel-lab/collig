@@ -238,10 +238,26 @@ def load_skill_from_path(skill_path: Path) -> Optional[Skill]:
     if not module_path:
         return None
 
-    # Load the module
-    spec = importlib.util.spec_from_file_location(f"skill_{skill_path.name}", module_path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # Prefer the canonical package import.  Loading a built-in skill with
+    # spec_from_file_location creates a second module object, which breaks
+    # class-level state shared with the rest of the app (for example
+    # NewsSkill._news_cache read by the CLI after a direct tool call).
+    module = None
+    if init_py.exists():
+        try:
+            import importlib
+
+            repo_root = Path(__file__).resolve().parent.parent
+            rel = skill_path.resolve().relative_to(repo_root)
+            if rel.parts and all(part.isidentifier() for part in rel.parts):
+                module = importlib.import_module(".".join(rel.parts))
+        except Exception:
+            module = None
+
+    if module is None:
+        spec = importlib.util.spec_from_file_location(f"skill_{skill_path.name}", module_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
 
     # Find the Skill class (first subclass of Skill)
     for attr_name in dir(module):

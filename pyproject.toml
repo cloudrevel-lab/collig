@@ -6,10 +6,12 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "aiosqlite>=0.22.0",
+    "airportsdata>=20260905",
     "black>=26.1.0",
     "bs4>=0.0.2",
     "chromadb>=1.5.0",
     "ddgs>=9.10.0",
+    "fast-flights>=3.1.0,<4",
     "fastapi>=0.128.6",
     "flake8>=7.3.0",
     "google-adk==2.7.0",
@@ -23,6 +25,7 @@ dependencies = [
     "langchain-community>=0.4.1",
     "langchain-ollama>=1.0.1",
     "langchain-openai>=1.1.8",
+    "litellm==1.97.0",
     "openai>=2.18.0",
     "playwright>=1.58.0",
     "prompt-toolkit>=3.0.52",

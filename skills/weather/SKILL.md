@@ -12,7 +12,7 @@ tools:
 config:
   required: []
   optional:
-    - WEATHER_UNITS: Temperature units (celsius or fahrenheit), default: celsius
+    - "WEATHER_UNITS (celsius or fahrenheit, default celsius)"
 
 triggers:
   - weather
@@ -55,6 +55,7 @@ Get weather information for a location.
 - tomorrow, tmr, tmrw
 - day after tomorrow
 - next week
+- rest of the week, this week, next few days, coming days (multi-day list)
 - Specific day names (Monday, Tuesday, etc.)
 
 **Returns:** Formatted weather report with temperature, conditions, and relevant metrics.

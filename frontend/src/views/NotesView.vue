@@ -55,8 +55,7 @@
     </v-row>
 
     <!-- Add / Edit Dialog -->
-    <v-dialog v-model="dialog" max-width="600">
-      <v-card rounded="xl">
+    <v-dialog v-model="dialog" max-width="600">      <v-card rounded="xl">
         <v-card-title>{{ editItem ? 'Edit Note' : 'Add Note' }}</v-card-title>
         <v-divider />
         <v-card-text class="pt-4">
@@ -68,6 +67,10 @@
             auto-grow
             autofocus
           />
+          <div class="text-caption text-medium-emphasis mt-2">
+            Stored as plain text on this machine. Passwords and tokens are allowed
+            (you will see a warning after saving).
+          </div>
         </v-card-text>
         <v-divider />
         <v-card-actions class="pa-3">
@@ -95,6 +98,13 @@
         </v-card-actions>
       </v-card>
     </v-dialog>
+
+    <v-snackbar v-model="snackbar.show" :color="snackbar.color" :timeout="snackbar.timeout">
+      {{ snackbar.text }}
+      <template #actions>
+        <v-btn variant="text" @click="snackbar.show = false">Close</v-btn>
+      </template>
+    </v-snackbar>
   </div>
 </template>
 
@@ -112,6 +122,22 @@ const deleteDialog = ref(false)
 const editItem = ref(null)
 const deleteItem = ref(null)
 const form = ref({ content: '' })
+const snackbar = ref({ show: false, text: '', color: 'success', timeout: 4000 })
+
+function notify(text, color = 'success', timeout = 4000) {
+  snackbar.value = { show: true, text, color, timeout }
+}
+
+async function errorMessage(res) {
+  try {
+    const data = await res.json()
+    if (typeof data.detail === 'string') return data.detail
+    if (data.detail) return JSON.stringify(data.detail)
+    return `Request failed (${res.status})`
+  } catch {
+    return `Request failed (${res.status})`
+  }
+}
 
 const filteredNotes = computed(() => {
   if (!search.value) return notes.value
@@ -127,6 +153,7 @@ async function loadNotes() {
     notes.value = data.notes || []
   } catch (e) {
     console.error('Failed to load notes:', e)
+    notify('Could not load notes: ' + (e?.message || e), 'error')
   } finally {
     loading.value = false
   }
@@ -152,11 +179,16 @@ async function saveNote() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(form.value),
     })
-    if (!res.ok) throw new Error(await res.text())
+    if (!res.ok) throw new Error(await errorMessage(res))
+    const data = await res.json()
     dialog.value = false
+    // The note is saved either way; a warning just says it is plain text.
+    if (data.warning) notify(data.warning, 'warning', 6000)
+    else notify(editItem.value ? 'Note updated' : 'Note saved')
     await loadNotes()
   } catch (e) {
     console.error('Failed to save note:', e)
+    notify('Could not save note: ' + (e?.message || e), 'error', 6000)
   } finally {
     saving.value = false
   }
@@ -172,11 +204,13 @@ async function executeDelete() {
   saving.value = true
   try {
     const res = await fetch(`${API_BASE}/notes/${deleteItem.value.id}`, { method: 'DELETE' })
-    if (!res.ok) throw new Error(await res.text())
+    if (!res.ok) throw new Error(await errorMessage(res))
     deleteDialog.value = false
+    notify('Note deleted')
     await loadNotes()
   } catch (e) {
     console.error('Failed to delete note:', e)
+    notify('Could not delete note: ' + (e?.message || e), 'error', 6000)
   } finally {
     saving.value = false
   }

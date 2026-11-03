@@ -141,12 +141,23 @@ class TracePlugin(BasePlugin):
 
         system_prompt = None
         messages: List[Dict] = []
+        # ADK 2.x keeps the system instruction and the tool declarations on
+        # `llm_request.config`; reading `llm_request.system_instruction` (as
+        # this used to) raised AttributeError and the single try/except then
+        # also discarded every message and tool, so the trace panel showed
+        # "0 message(s), 0 tool(s) offered" for every call.
+        config = getattr(llm_request, "config", None)
         try:
-            if llm_request.system_instruction:
-                parts = llm_request.system_instruction.parts or []
+            instruction = getattr(config, "system_instruction", None)
+            if instruction is not None:
+                parts = getattr(instruction, "parts", None) or []
                 system_prompt = "\n".join(
                     p.text for p in parts if getattr(p, "text", None)
                 )
+        except Exception:
+            pass
+
+        try:
             for c in llm_request.contents or []:
                 role = getattr(c, "role", "user")
                 text_parts = [
@@ -161,10 +172,9 @@ class TracePlugin(BasePlugin):
 
         tools: List[Dict] = []
         try:
-            tool_list = getattr(llm_request.config, "tools", None) if llm_request.config else None
+            tool_list = getattr(config, "tools", None)
             for t in (tool_list or []):
-                fn = getattr(t, "function_declaration", None)
-                if fn is not None:
+                for fn in (getattr(t, "function_declarations", None) or []):
                     tools.append({
                         "name": getattr(fn, "name", ""),
                         "description": getattr(fn, "description", ""),

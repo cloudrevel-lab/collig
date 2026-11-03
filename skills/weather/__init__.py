@@ -101,51 +101,87 @@ class WeatherSkill(Skill):
 
         return score
 
+    # Phrases that ask for more than one day rather than a single date.
+    WEEK_RANGE_HINTS = (
+        "rest of the week",
+        "the rest of the week",
+        "this week",
+        "next few days",
+        "coming days",
+        "week forecast",
+        "7-day",
+        "7 day",
+        "seven day",
+        "weekend",
+    )
+
+    def _parse_date_hint(self, query: str) -> tuple[int, bool, str]:
+        """
+        Split a query into ``(days_ahead, week_range, query_without_the_hint)``.
+
+        ``week_range`` is True for "rest of the week" / "next few days" style
+        requests, which need a multi-day answer: the assistant offers exactly
+        that as a follow-up, so the tool has to be able to deliver it.
+        """
+        query_lower = (query or "").lower()
+
+        days_ahead = 0  # 0 = today/current
+        week_range = any(hint in query_lower for hint in self.WEEK_RANGE_HINTS)
+
+        if week_range:
+            days_ahead = 0
+        elif 'day after tomorrow' in query_lower:
+            days_ahead = 2
+        elif any(w in query_lower for w in ['tomorrow', 'tmr', 'tmrw']):
+            days_ahead = 1
+        elif 'today' in query_lower or 'current' in query_lower or 'now' in query_lower:
+            days_ahead = 0
+        elif 'next week' in query_lower:
+            days_ahead = 7
+        else:
+            # Check for specific day names (e.g. "on Monday", "next Monday")
+            day_names = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
+            today_weekday = datetime.now().weekday()
+            for i, day in enumerate(day_names):
+                if day in query_lower:
+                    days_until = (i - today_weekday) % 7
+                    if days_until == 0:
+                        days_until = 7  # If same day, assume next week
+                    days_ahead = days_until
+                    break
+
+        # Remove the date hint before geocoding, or the hint itself is looked
+        # up as part of the place name.
+        hints = (
+            r'day\s+after\s+tomorrow'
+            r'|rest\s+of\s+the\s+week|the\s+rest\s+of\s+the\s+week'
+            r'|this\s+week|next\s+few\s+days|coming\s+days|week\s+forecast'
+            r'|7[\s-]?day|seven\s+day|weekend'
+            r'|tomorrow|tmr|tmrw|today|current|now|next\s+week'
+            r'|next\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)'
+            r'|on\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)'
+        )
+        clean_query = re.sub(r'\b(' + hints + r')\b', '', query, flags=re.IGNORECASE)
+        clean_query = re.sub(r'\s+', ' ', clean_query).strip()
+        return days_ahead, week_range, clean_query
+
     def get_tools(self) -> List[BaseTool]:
         @tool
         def get_weather(query: str) -> str:
             """
             Get the current weather or forecast for a specific city.
             Supports queries like "Sydney", "Oatlands NSW 2117", "Sydney tomorrow",
-            "London next week", "Paris on Monday".
-            
+            "London next week", "Paris on Monday", "Sydney rest of the week",
+            "Oatlands next few days".
+
             Args:
-                query: The city and optional date (e.g., "London", "Sydney tomorrow", "Oatlands NSW 2117 next Monday").
+                query: The city and optional date, e.g. "London",
+                    "Sydney tomorrow", "Oatlands NSW 2117 next Monday",
+                    "Sydney rest of the week".
             """
             try:
-                # Parse the query for location and date hints
-                query_lower = query.lower()
-
-                # Determine date offset from query hints
-                days_ahead = 0  # 0 = today/current
-                if any(w in query_lower for w in ['tomorrow', 'tmr', 'tmrw']):
-                    days_ahead = 1
-                elif 'day after tomorrow' in query_lower:
-                    days_ahead = 2
-                elif 'today' in query_lower or 'current' in query_lower or 'now' in query_lower:
-                    days_ahead = 0
-                elif 'next week' in query_lower:
-                    days_ahead = 7
-                else:
-                    # Check for specific day names (e.g., "on Monday", "next Monday")
-                    day_names = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
-                    today_weekday = datetime.now().weekday()
-                    for i, day in enumerate(day_names):
-                        if day in query_lower:
-                            days_until = (i - today_weekday) % 7
-                            if days_until == 0:
-                                days_until = 7  # If same day, assume next week
-                            days_ahead = days_until
-                            break
-
-                # Parse the query to extract city, state, postcode
-                # Remove date hints before geocoding
-                clean_query = re.sub(
-                    r'\b(tomorrow|tmr|tmrw|today|current|now|next\s+week|next\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)|on\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)|the\s+day\s+after\s+tomorrow)\b',
-                    '', query, flags=re.IGNORECASE
-                ).strip()
-                # Clean up extra spaces
-                clean_query = re.sub(r'\s+', ' ', clean_query).strip()
+                # Parse the query for location and date hints.
+                days_ahead, week_range, clean_query = self._parse_date_hint(query)
 
                 target_city, target_state, target_postcode = self._parse_location_query(clean_query)
 
@@ -230,37 +266,71 @@ class WeatherSkill(Skill):
                         f"Humidity: {humidity}%\n"
                         f"Wind: {wind} km/h"
                     )
-                else:
-                    # Show forecast for the requested day
+                if week_range:
+                    # "rest of the week" / "next few days": one line per day,
+                    # starting tomorrow and running to Sunday (at least three
+                    # days, at most a week, capped by the API's 16-day window).
                     daily = weather_data.get("daily", {})
                     dates = daily.get("time", [])
-                    target_date_str = (datetime.now() + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
+                    if not dates:
+                        return f"No forecast data available for {display_location}."
 
-                    if target_date_str not in dates:
-                        return (
-                            f"Sorry, I can only provide forecasts for the next 16 days. "
-                            f"'{query}' is beyond the forecast range."
-                        )
+                    today = datetime.now()
+                    first = 1
+                    last = min(6 - today.weekday(), first + 5, len(dates) - 1)
+                    if last < first + 2:
+                        last = min(first + 2, len(dates) - 1)
 
-                    idx = dates.index(target_date_str)
-                    temp_max = daily.get("temperature_2m_max", [None] * len(dates))[idx]
-                    temp_min = daily.get("temperature_2m_min", [None] * len(dates))[idx]
-                    code = daily.get("weather_code", [None] * len(dates))[idx]
-                    precip = daily.get("precipitation_probability_max", [None] * len(dates))[idx]
-                    wind = daily.get("wind_speed_10m_max", [None] * len(dates))[idx]
-                    condition = get_condition(code)
+                    rows = [f"Weather forecast for {display_location} — rest of the week:"]
+                    for offset in range(first, last + 1):
+                        target = (today + timedelta(days=offset)).strftime("%Y-%m-%d")
+                        if target not in dates:
+                            continue
+                        idx = dates.index(target)
+                        day_max = daily.get("temperature_2m_max", [None] * len(dates))[idx]
+                        day_min = daily.get("temperature_2m_min", [None] * len(dates))[idx]
+                        day_code = daily.get("weather_code", [None] * len(dates))[idx]
+                        day_precip = daily.get("precipitation_probability_max", [None] * len(dates))[idx]
+                        day_wind = daily.get("wind_speed_10m_max", [None] * len(dates))[idx]
+                        label = (today + timedelta(days=offset)).strftime("%A, %B %d")
+                        row = f"{label}: {get_condition(day_code)} — {day_max}°C / {day_min}°C"
+                        if day_precip is not None:
+                            row += f", rain {day_precip}%"
+                        if day_wind is not None:
+                            row += f", wind {day_wind} km/h"
+                        rows.append(row)
+                    return "\n".join(rows)
 
-                    day_label = "Tomorrow" if days_ahead == 1 else f"In {days_ahead} days"
-                    date_display = (datetime.now() + timedelta(days=days_ahead)).strftime("%A, %B %d")
+                # Show forecast for the requested day
+                daily = weather_data.get("daily", {})
+                dates = daily.get("time", [])
+                target_date_str = (datetime.now() + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
 
-                    result = f"Weather forecast for {display_location} — {day_label} ({date_display}):\n"
-                    result += f"Condition: {condition}\n"
-                    result += f"High: {temp_max}°C / Low: {temp_min}°C\n"
-                    if precip is not None:
-                        result += f"Precipitation chance: {precip}%\n"
-                    if wind is not None:
-                        result += f"Max wind: {wind} km/h"
-                    return result
+                if target_date_str not in dates:
+                    return (
+                        f"Sorry, I can only provide forecasts for the next 16 days. "
+                        f"'{query}' is beyond the forecast range."
+                    )
+
+                idx = dates.index(target_date_str)
+                temp_max = daily.get("temperature_2m_max", [None] * len(dates))[idx]
+                temp_min = daily.get("temperature_2m_min", [None] * len(dates))[idx]
+                code = daily.get("weather_code", [None] * len(dates))[idx]
+                precip = daily.get("precipitation_probability_max", [None] * len(dates))[idx]
+                wind = daily.get("wind_speed_10m_max", [None] * len(dates))[idx]
+                condition = get_condition(code)
+
+                day_label = "Tomorrow" if days_ahead == 1 else f"In {days_ahead} days"
+                date_display = (datetime.now() + timedelta(days=days_ahead)).strftime("%A, %B %d")
+
+                result = f"Weather forecast for {display_location} — {day_label} ({date_display}):\n"
+                result += f"Condition: {condition}\n"
+                result += f"High: {temp_max}°C / Low: {temp_min}°C\n"
+                if precip is not None:
+                    result += f"Precipitation chance: {precip}%\n"
+                if wind is not None:
+                    result += f"Max wind: {wind} km/h"
+                return result
 
             except Exception as e:
                 return f"Error fetching weather: {e}"

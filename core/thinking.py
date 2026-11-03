@@ -2,9 +2,11 @@
 Intuitive thinking / planning display for agent turns.
 
 The old CLI printed a flat "[Thinking Process]" heading and a couple of
-indented lines.  This module renders a live, structured timeline instead:
+indented lines.  This module renders a live, structured timeline instead,
+separated from the rest of the transcript by a single horizontal rule:
 
-    ◆ Thinking · 2.4s
+    ────────────────────────────────────────────────────────
+    ◆ Thinking  2.4s
       ✔ Understanding   what's the weather in Sydney?
       ✔ Skills          Weather Reporter · 1 tool
       ✔ Plan            get_weather(city="Sydney")
@@ -21,9 +23,9 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
 
-from rich.console import Console
+from rich.console import Console, Group
 from rich.live import Live
-from rich.panel import Panel
+from rich.rule import Rule
 from rich.text import Text
 
 
@@ -99,7 +101,7 @@ class ThinkingBlock:
         if self.live is not None:
             self.live.update(self._render())
 
-    def _render(self) -> Panel:
+    def _render(self) -> Group:
         body = Text()
         body.append("◆ Thinking", style="bold cyan")
         body.append(f"  {self._elapsed():.1f}s", style="dim")
@@ -128,10 +130,9 @@ class ThinkingBlock:
             if step.elapsed is not None:
                 body.append(f"  ({step.elapsed:.2f}s)", style="dim")
             body.append("\n")
-        return Panel(
+        return Group(
+            Rule(characters="─", style="cyan" if self.live is not None else "dim"),
             body,
-            border_style="cyan" if self.live is not None else "dim",
-            padding=(0, 1),
         )
 
     def finish(self) -> None:

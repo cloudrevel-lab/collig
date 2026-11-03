@@ -9,6 +9,7 @@ venv/
 # Node
 node_modules/
 dist/
+dist-terminal/
 .DS_Store
 backend/sessions/
 backend/data/bookmarks_db/

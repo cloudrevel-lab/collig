@@ -23,15 +23,142 @@ from core.paths import paths
 from prompt_toolkit import PromptSession
 from prompt_toolkit.styles import Style
 from prompt_toolkit.history import InMemoryHistory, FileHistory
-from prompt_toolkit.completion import Completer, Completion
+from prompt_toolkit.completion import Completer, Completion, CompleteEvent
 from prompt_toolkit.document import Document
+from prompt_toolkit.filters import has_completions
 from prompt_toolkit.formatted_text import HTML, to_formatted_text
 from prompt_toolkit.shortcuts import prompt
 from prompt_toolkit.key_binding import KeyBindings
 
+
 class SkillCommandCompleter(Completer):
     def __init__(self, agent):
         self.agent = agent
+
+    def _argument_completions(self, text):
+        """
+        Dynamic suggestions for a command's argument, or None at command level.
+
+        ``/chatto `` must list the distilled personalities, not the static
+        "chatto off"/"chatto list" sub-command strings.  The same applies to
+        the other commands whose argument is a name rather than a fixed choice.
+        """
+        body = text[1:] if text.startswith("/") else text
+        if " " not in body:
+            return None
+        command, _, arg = body.partition(" ")
+        command = command.lower()
+
+        if command in ("chatto", "personality"):
+            return self._personality_completions(arg, include_actions=True)
+
+        if command == "distill":
+            sub, _, rest = arg.partition(" ")
+            if sub.lower() in ("show", "cat", "rm", "delete", "remove") and " " in arg:
+                return self._personality_completions(rest, include_actions=False)
+            return None
+
+        if command == "memory":
+            sub, _, rest = arg.partition(" ")
+            if sub.lower() in ("forget", "remove", "delete", "rm") and " " in arg:
+                return self._fact_completions(rest)
+            return None
+
+        return None
+
+    def _personality_completions(self, prefix, include_actions):
+        """Completion entries for distilled personality names."""
+        items = []
+        try:
+            from core.personality import get_personality_manager
+
+            manager = get_personality_manager()
+            active = manager.current() or {}
+            active_slug = str(active.get("slug") or "")
+            active_name = str(active.get("name") or "")
+            found = []
+            for meta in manager.list():
+                name = str(meta.get("name") or meta.get("slug") or "").strip()
+                slug = str(meta.get("slug") or "")
+                if not name:
+                    continue
+                if not (_matches_argument(name, prefix) or _matches_argument(slug, prefix)):
+                    continue
+                canonical = str(meta.get("canonical_name") or "")
+                meta_text = f"personality · {slug}" if slug else "personality"
+                if canonical and canonical.casefold() != name.casefold():
+                    meta_text = f"{canonical} · {slug}"
+                if slug and slug == active_slug:
+                    meta_text = f"active · {slug}"
+                found.append((name, meta_text))
+        except Exception:
+            found = []
+
+        # Active first, then prefix matches, then substring matches; within
+        # each group alphabetical order is easier to scan than "recently
+        # updated".
+        lowered = (prefix or "").strip().lower()
+        found.sort(
+            key=lambda item: (
+                0 if active_name and item[0] == active_name else 1,
+                0 if item[0].lower().startswith(lowered) else 1,
+                item[0].lower(),
+            )
+        )
+
+        seen = set()
+        for name, meta_text in found:
+            if name in seen:
+                continue
+            seen.add(name)
+            items.append(
+                Completion(
+                    name,
+                    start_position=-len(prefix),
+                    display=name,
+                    display_meta=meta_text,
+                )
+            )
+
+        if include_actions:
+            for action, description in (
+                ("off", "Stop the active personality"),
+                ("list", "List all personalities"),
+            ):
+                if _matches_argument(action, prefix):
+                    items.append(
+                        Completion(
+                            action,
+                            start_position=-len(prefix),
+                            display=action,
+                            display_meta=description,
+                        )
+                    )
+        return items
+
+    def _fact_completions(self, prefix):
+        """Completion entries for /memory forget keys."""
+        items = []
+        try:
+            from core.user_memory import get_user_memory
+
+            for fact in get_user_memory().list_facts():
+                key = str(fact.get("key") or "")
+                if not key or not _matches_argument(key, prefix):
+                    continue
+                value = str(fact.get("value") or "")
+                meta = f"{fact.get('category') or 'other'} · {value[:60]}"
+                items.append(
+                    Completion(
+                        key,
+                        start_position=-len(prefix),
+                        display=key,
+                        display_meta=meta,
+                    )
+                )
+        except Exception:
+            pass
+        return items
 
     def get_completions(self, document: Document, complete_event):
         text = document.text_before_cursor
@@ -45,12 +172,19 @@ class SkillCommandCompleter(Completer):
                 ("!git diff", "Git diff"),
             ):
                 if cmd.startswith(text):
-                    yield Completion(cmd, start_position=-len(text),
-                                     display=cmd, display_meta=desc)
+                    yield Completion(cmd, start_position=-len(text), display=cmd, display_meta=desc)
             return
 
         # Only trigger if it starts with /
         if not text.startswith("/"):
+            return
+
+        # A command that takes a name (/chatto <person>, /distill show <name>,
+        # /memory forget <key>) gets dynamic suggestions for that argument.
+        argument_completions = self._argument_completions(text)
+        if argument_completions is not None:
+            for completion in argument_completions:
+                yield completion
             return
 
         # Get the command part (remove /)
@@ -82,6 +216,31 @@ class SkillCommandCompleter(Completer):
             ("stats overall", "Show overall token usage across all sessions"),
             ("doctor", "Check system health and LLM connection"),
             ("test", "Alias for doctor"),
+            ("distill", "Build a personality folder from public resources (e.g. /distill Spider-Man)"),
+            ("distill list", "List distilled personalities"),
+            ("distill show", "Print a personality dossier"),
+            ("distill rm", "Delete a personality"),
+            ("chatto", "Activate a distilled personality (e.g. /chatto Spider-Man)"),
+            ("chatto off", "Return to plain Collig"),
+            ("chatto list", "List distilled personalities"),
+            ("personality", "Show the active personality"),
+            ("load-personas", "Browse or install shared personas from the Collig market"),
+            ("load-personas list", "List the shared persona market"),
+            ("load-personas refresh", "Refresh the cached persona market"),
+            ("load-personas search", "Search the persona market"),
+            ("load-personas --all", "Install every available persona"),
+            ("load-personas --force", "Replace an installed persona"),
+            ("memory", "Show what Collig remembers about you"),
+            ("memory list", "List remembered facts"),
+            ("memory search", "Search remembered facts"),
+            ("memory forget", "Forget one remembered fact"),
+            ("memory note", "Explicitly remember a note"),
+            ("memory clear", "Remove all remembered facts"),
+            ("memory on", "Enable automatic user memory"),
+            ("memory off", "Disable automatic user memory"),
+            ("memory proactive on", "Allow routine-based proactive actions"),
+            ("memory proactive off", "Disable routine-based proactive actions"),
+            ("memory path", "Show where memory is stored"),
             ("run", "Run a shell command (e.g., /run ls -la)"),
             ("restart", "Restart the session (reload code)"),
             ("quiet", "Hide thinking messages"),
@@ -105,11 +264,11 @@ class SkillCommandCompleter(Completer):
             ("jira remove-board", "Remove a saved board (e.g., /jira remove-board 1726)"),
             ("exit", "Exit the application"),
             ("quit", "Exit the application"),
-            ("clear", "Clear the screen")
+            ("clear", "Clear the screen"),
         ]
 
         # Add skill tools
-        if hasattr(self.agent, 'tools'):
+        if hasattr(self.agent, "tools"):
             for tool in self.agent.tools:
                 commands.append((tool.name, f"Tool: {tool.description}"))
 
@@ -126,6 +285,214 @@ class SkillCommandCompleter(Completer):
         for command, description in commands:
             if cmd in command.lower() and command not in seen:
                 yield Completion(command, start_position=-len(cmd), display=command, display_meta=description)
+
+
+def _active_completion(buffer):
+    """
+    Return the completion currently highlighted in the menu.
+
+    When the menu has just opened because the user typed "/", prompt_toolkit
+    has no selection yet (``complete_index is None``).  In that case the first
+    match is the sensible default for Tab / Space / Enter to accept.
+    """
+    state = getattr(buffer, "complete_state", None)
+    if state is None or not state.completions:
+        return None
+    index = state.complete_index
+    if index is None or index < 0 or index >= len(state.completions):
+        return state.completions[0]
+    return state.completions[index]
+
+
+def _completions_for(buffer):
+    """Compute the completion candidates for the buffer synchronously."""
+    completer = getattr(buffer, "completer", None)
+    if completer is None:
+        return []
+    try:
+        return list(completer.get_completions(buffer.document, CompleteEvent(completion_requested=True)))
+    except Exception:
+        return []
+
+
+def _matches_argument(value: str, prefix: str) -> bool:
+    """Prefix or substring match for a typed argument (case-insensitive)."""
+    value = (value or "").lower()
+    prefix = (prefix or "").strip().lower()
+    if not prefix:
+        return True
+    return value.startswith(prefix) or prefix in value
+
+
+def _argument_position(text: str) -> bool:
+    """
+    True when ``text`` is at a position where a name/key argument is expected.
+
+    Only commands whose argument completion is dynamic return True.  In
+    particular ``/jira `` is not an argument position: its Space must remain a
+    literal separator rather than selecting the first sub-command.
+    """
+    body = text[1:] if text.startswith("/") else text
+    if " " not in body:
+        return False
+    command, _, arg = body.partition(" ")
+    command = command.lower()
+    if command in ("chatto", "personality"):
+        return True
+    if command == "distill":
+        sub, _, _ = arg.partition(" ")
+        return sub.lower() in ("show", "cat", "rm", "delete", "remove") and " " in arg
+    if command == "memory":
+        sub, _, _ = arg.partition(" ")
+        return sub.lower() in ("forget", "remove", "delete", "rm") and " " in arg
+    return False
+
+
+def _has_highlighted_completion(buffer) -> bool:
+    """True when the user has actively moved the menu selection."""
+    state = getattr(buffer, "complete_state", None)
+    if state is None or not state.completions:
+        return False
+    index = state.complete_index
+    return index is not None and 0 <= index < len(state.completions)
+
+
+def _at_parameter_boundary(text: str) -> bool:
+    """
+    True when the cursor sits just after the space that ends the command name.
+
+    After "/jira " the sub-command suggestions are still open, but Enter must
+    run `/jira`, and a second Space must insert a literal space rather than
+    selecting `/jira sprint`.
+    """
+    return text.endswith((" ", "\t"))
+
+
+def accept_completion(buffer, append_space: bool = False) -> bool:
+    """
+    Accept the highlighted command completion.
+
+    Used by the prompt key bindings so a "/" command can actually be selected
+    and then triggered:
+
+    * Tab   -> accept the selection;
+    * Space -> accept it and add the space that starts a parameter;
+    * Enter -> accept it and submit the resulting /command immediately.
+
+    Returns True when a completion was applied.
+    """
+    completion = _active_completion(buffer)
+    if completion is None:
+        completions = _completions_for(buffer)
+        if not completions:
+            return False
+        completion = completions[0]
+
+    buffer.apply_completion(completion)
+    if append_space:
+        buffer.insert_text(" ")
+    return True
+
+
+def make_prompt_key_bindings() -> KeyBindings:
+    """
+    Key bindings for the interactive prompt's command menu.
+
+    * ↑/↓    move the highlight (history when the menu is closed)
+    * Tab    accept the highlighted command
+    * Space  accept it and add a space so a parameter can follow
+    * Enter  accept it and run the /command straight away
+
+    prompt_toolkit's defaults make Tab cycle the menu and leave Space as a
+    literal character, so a highlighted command was never actually run.
+    """
+    kb = KeyBindings()
+
+    @kb.add("tab")
+    def _tab_accepts_selection(event):
+        accept_completion(event.current_buffer, append_space=False)
+
+    @kb.add(" ", filter=has_completions)
+    def _space_accepts_selection(event):
+        buffer = event.current_buffer
+        text = buffer.document.text_before_cursor
+        # At a *name* argument position (/chatto , /distill show , ...), Space
+        # should pick the highlighted personality instead of typing another
+        # separator.  At a sub-command position (/jira ) it must stay literal,
+        # so the user can still type "/jira sprint" manually.
+        if _at_parameter_boundary(text):
+            if _argument_position(text) and accept_completion(buffer, append_space=False):
+                return
+            buffer.insert_text(" ")
+            return
+        accept_completion(buffer, append_space=True)
+
+    @kb.add("enter", filter=has_completions)
+    def _enter_runs_selection(event):
+        buffer = event.current_buffer
+        text = buffer.document.text_before_cursor
+        # A trailing space means the command itself is finished.  For a name
+        # argument, Enter after arrowing to a name should run that selection;
+        # without an explicit selection, submit the command as typed.
+        if _argument_position(text):
+            if _has_highlighted_completion(buffer):
+                accept_completion(buffer, append_space=False)
+        elif not _at_parameter_boundary(text):
+            accept_completion(buffer, append_space=False)
+        buffer.validate_and_handle()
+
+    # Dedicated history keys, so ↑/↓ stay available for menu navigation.
+    @kb.add("c-p")
+    def _history_backward(event):
+        event.current_buffer.history_backward()
+
+    @kb.add("c-n")
+    def _history_forward(event):
+        event.current_buffer.history_forward()
+
+    return kb
+
+
+def make_bottom_toolbar():
+    """Bottom toolbar callback: menu hints while completions are open."""
+
+    def get_bottom_toolbar():
+        if has_completions():
+            return to_formatted_text(
+                [
+                    ("bold", " [↑/↓]"),
+                    ("", " Navigate  "),
+                    ("bold", "[Tab]"),
+                    ("", " Complete  "),
+                    ("bold", "[Space]"),
+                    ("", " Complete + parameter  "),
+                    ("bold", "[Enter]"),
+                    ("", " Run  "),
+                    ("bold", "[Ctrl+G]"),
+                    ("", " Close"),
+                ],
+                style="class:bottom-toolbar",
+            )
+        return to_formatted_text(
+            [
+                ("bold", " [Ctrl+C]"),
+                ("", " Stop  "),
+                ("bold", "[/]"),
+                ("", " Commands  "),
+                ("bold", "[!]"),
+                ("", " Shell  "),
+                ("bold", "[↑/↓]"),
+                ("", " History  "),
+                ("bold", "[Ctrl+P/N]"),
+                ("", " History  "),
+                ("bold", "[Tab]"),
+                ("", " Complete"),
+            ],
+            style="class:bottom-toolbar",
+        )
+
+    return get_bottom_toolbar
+
 
 # Load environment variables
 load_dotenv()
@@ -245,13 +612,11 @@ def interactive_select(title: str, options: list, default_index: int = 0) -> str
 # Global reference to news cache access functions
 _news_functions = None
 
+
 def set_news_functions(get_cache_func, get_query_func):
     """Set the news functions from the NewsSkill."""
     global _news_functions
-    _news_functions = {
-        "get_cache": get_cache_func,
-        "get_query": get_query_func
-    }
+    _news_functions = {"get_cache": get_cache_func, "get_query": get_query_func}
 
 
 # Import news cache system
@@ -261,35 +626,43 @@ except ImportError:
     pass
 
 
-def interactive_news_menu(news_items: list, query: str = "") -> dict:
+def interactive_news_menu(news_items: list, query: str = "") -> None:
     """
     Display an interactive news menu with navigation and actions.
+
+    Actions (open in browser, save search) run inside the prompt_toolkit
+    application and report their result on an in-UI status line.  Nothing is
+    written to the Rich console while the application is running: mixing
+    prompt_toolkit's incremental redraws with direct console output is what
+    made the screen drift and duplicate lines.  The console is only touched
+    once the application has exited.
 
     Args:
         news_items: List of news item dicts from DDGS
         query: The original search query
-
-    Returns:
-        Dict with action type and data, or None if cancelled
     """
     from prompt_toolkit import Application
     from prompt_toolkit.layout import Layout, HSplit, Window
     from prompt_toolkit.layout.controls import FormattedTextControl
-    from prompt_toolkit.layout.dimension import Dimension
     from prompt_toolkit.key_binding import KeyBindings
 
     if not news_items:
-        return None
+        return
 
     selected_index = 0
     mode = "list"  # "list" or "detail"
-    last_action = None
-    save_status = None  # Track save status message
+    status = None  # (style, text) rendered on a reserved line above the footer
+    menu_control = None  # created below, before any key binding can fire
 
     def truncate_text(text: str, max_len: int = 60) -> str:
         if not text:
             return ""
         return text[:max_len] + "..." if len(text) > max_len else text
+
+    def status_fragments():
+        # Always return one line so showing/hiding a message never changes the
+        # height of the window (a resize mid-render can leave stale rows).
+        return [status if status else ("", "")]
 
     def get_list_text():
         result = []
@@ -300,9 +673,9 @@ def interactive_news_menu(news_items: list, query: str = "") -> dict:
             result.append(("", "\n\n"))
 
         for i, item in enumerate(news_items):
-            title = item.get('title', 'No Title')
-            source = item.get('source', 'Unknown')
-            date = item.get('date', '')
+            title = item.get("title", "No Title")
+            source = item.get("source", "Unknown")
+            date = item.get("date", "")
 
             display_title = truncate_text(title, 55)
             prefix = " > " if i == selected_index else "   "
@@ -319,19 +692,18 @@ def interactive_news_menu(news_items: list, query: str = "") -> dict:
                 result.append(("", line + "\n"))
 
         result.append(("", "\n"))
-        # Show save status message if available
-        if save_status:
-            result.append(("green", f"{save_status}\n"))
+        result.extend(status_fragments())
+        result.append(("", "\n"))
         result.append(("dim", "[↑/↓/k/j] Navigate  [Enter] Read  [o] Open  [s] Save  [Esc] Quit"))
         return to_formatted_text(result)
 
     def get_detail_text():
         item = news_items[selected_index]
-        title = item.get('title', 'No Title')
-        body = item.get('body', 'No content available.')
-        source = item.get('source', 'Unknown')
-        url = item.get('url', '#')
-        date = item.get('date', '')
+        title = item.get("title", "No Title")
+        body = item.get("body", "No content available.")
+        source = item.get("source", "Unknown")
+        url = item.get("url", "#")
+        date = item.get("date", "")
 
         result = []
         result.append(("bold cyan", f"📰 {title}\n\n"))
@@ -341,8 +713,21 @@ def interactive_news_menu(news_items: list, query: str = "") -> dict:
         result.append(("", "\n\n"))
         result.append(("", f"{body}\n\n"))
         result.append(("cyan", f"Link: {url}\n\n"))
+        result.extend(status_fragments())
+        result.append(("", "\n"))
         result.append(("dim", "[b] Back  [o] Open in Browser  [Esc] Quit"))
         return to_formatted_text(result)
+
+    def refresh(event=None):
+        if menu_control is not None:
+            menu_control.text = get_list_text() if mode == "list" else get_detail_text()
+        if event is not None:
+            event.app.invalidate()
+
+    def set_status(text, style="green", event=None):
+        nonlocal status
+        status = (style, text)
+        refresh(event)
 
     kb = KeyBindings()
 
@@ -352,7 +737,7 @@ def interactive_news_menu(news_items: list, query: str = "") -> dict:
         nonlocal selected_index
         if mode == "list":
             selected_index = (selected_index - 1) % len(news_items)
-            menu_control.text = get_list_text()
+            refresh(event)
 
     @kb.add("down")
     @kb.add("j")
@@ -360,54 +745,52 @@ def interactive_news_menu(news_items: list, query: str = "") -> dict:
         nonlocal selected_index
         if mode == "list":
             selected_index = (selected_index + 1) % len(news_items)
-            menu_control.text = get_list_text()
+            refresh(event)
 
     @kb.add("enter")
     def read_item(event):
         nonlocal mode
         if mode == "list":
             mode = "detail"
-            menu_control.text = get_detail_text()
+            refresh(event)
 
     @kb.add("b")
     def back_to_list(event):
         nonlocal mode
         if mode == "detail":
             mode = "list"
-            menu_control.text = get_list_text()
+            refresh(event)
 
     @kb.add("o")
     def open_url(event):
-        nonlocal last_action
         item = news_items[selected_index]
-        url = item.get('url')
-        if url and url != '#':
-            import webbrowser
-            try:
-                webbrowser.open(url)
-                console.print(f"[green]Opening: {url}[/green]")
-                last_action = {"action": "open", "url": url, "index": selected_index}
-            except Exception as e:
-                console.print(f"[red]Failed to open browser: {e}[/red]")
-        else:
-            console.print("[yellow]No URL available for this item[/yellow]")
+        url = item.get("url")
+        if not url or url == "#":
+            set_status("⚠ No URL available for this item", "yellow", event)
+            return
+        import webbrowser
+
+        try:
+            webbrowser.open(url)
+        except Exception as e:
+            set_status(f"⚠ Could not open browser: {e}", "red", event)
+            return
+        set_status("🌐 Opened in your browser", "green", event)
 
     @kb.add("s")
     def save_search(event):
         """Save the current news search to cache."""
-        nonlocal save_status
         if not query:
-            save_status = "⚠ No query to save"
-        else:
-            try:
-                from core.news_cache import get_news_cache_manager
-                cache_mgr = get_news_cache_manager()
-                cache_id = cache_mgr.save_search(query, news_items)
-                save_status = f"✅ Saved! (ID: {cache_id[-6:]})"
-                console.print(f"[green]News saved: '{query}'[/green]")
-            except Exception as e:
-                save_status = f"⚠ Save failed: {e}"
-        menu_control.text = get_list_text()
+            set_status("⚠ No query to save", "yellow", event)
+            return
+        try:
+            from core.news_cache import get_news_cache_manager
+
+            cache_mgr = get_news_cache_manager()
+            cache_id = cache_mgr.save_search(query, news_items)
+            set_status(f"✅ Saved! (ID: {cache_id[-6:]})", "green", event)
+        except Exception as e:
+            set_status(f"⚠ Save failed: {e}", "red", event)
 
     @kb.add("escape")
     @kb.add("q")
@@ -419,51 +802,72 @@ def interactive_news_menu(news_items: list, query: str = "") -> dict:
         event.app.exit(result=None)
 
     menu_control = FormattedTextControl(text=get_list_text())
-    window = Window(
-        content=menu_control,
-        width=Dimension(min=60, preferred=90),
-        height=Dimension(min=15, preferred=25)
-    )
+    # Keep the window exactly as tall as the list view and never taller than
+    # the terminal.  A layout that claims more rows than the terminal has makes
+    # the terminal scroll during a redraw, and prompt_toolkit then loses track
+    # of where its previous frame was.  The height also stays fixed when
+    # switching to the shorter detail view: a height change mid-session has the
+    # same effect on the inline renderer.
+    rows = shutil.get_terminal_size(fallback=(100, 30)).lines
+    window_height = min(len(news_items) + 5, max(1, rows - 1))
+    window = Window(content=menu_control, height=window_height, wrap_lines=False)
 
     layout = Layout(HSplit([window]))
-    app = Application(layout=layout, key_bindings=kb, full_screen=False)
+    app = Application(layout=layout, key_bindings=kb, full_screen=False, erase_when_done=False)
 
     try:
-        result = app.run()
-        return result if result is not None else last_action
+        app.run()
     except Exception as e:
         console.print(f"[dim]News menu error: {e}[/dim]")
-        return last_action
+    return None
 
 
-def handle_news_action(action_result: dict, agent):
-    """Handle the action selected from the news menu."""
-    if not action_result:
-        return
-
-    action = action_result.get("action")
-
-    if action == "open":
-        url = action_result.get("url")
-        if url:
-            import webbrowser
-            try:
-                webbrowser.open(url)
-                console.print(f"[green]Opening: {url}[/green]")
-            except Exception as e:
-                console.print(f"[red]Failed to open browser: {e}[/red]")
-
-
-def browse_news_items(news_items, query, agent):
+def browse_news_items(news_items, query, agent=None):
     """Open the interactive browser for a list of news items."""
     if not news_items:
         console.print("[yellow]No news items to browse.[/yellow]")
         return
-    while True:
-        news_action = interactive_news_menu(news_items, query)
-        if not news_action:
-            break
-        handle_news_action(news_action, agent)
+    interactive_news_menu(news_items, query)
+
+
+def news_browse_hint(news_items):
+    """One-line pointer to the browser, printed after a news turn.
+
+    The browser is a modal prompt_toolkit application, so opening it by itself
+    after an answer takes the keyboard and leaves the ``You:`` prompt
+    undrawn -- it looks exactly like the chat input has disappeared.  A hint
+    keeps the prompt live and the browser one explicit command away.
+    """
+    count = len(news_items or [])
+    noun = "news item" if count == 1 else "news items"
+    return f"📰 {count} {noun} ready · /news last to browse · /news cached to pick another"
+
+
+def pop_pending_news_browse():
+    """Consume the news request produced by the current turn.
+
+    A request is armed only when this turn deliberately searched for news
+    (``search_news``) or loaded a cached search (``load_cached_news``).
+    Merely having an old search in memory -- for example because it was
+    restored so ``read_news_item`` could answer a question -- must never
+    produce a hint on an unrelated turn such as a weather question.
+
+    Returns ``(news_items, query)`` when a request is pending, else ``None``.
+    The flag is consumed either way so a stale request cannot fire twice.
+    """
+    try:
+        from skills.news import NewsSkill
+    except Exception:
+        return None
+
+    if not NewsSkill.has_just_searched():
+        return None
+
+    NewsSkill.clear_search_flag()
+    news_items = NewsSkill.get_news_cache()
+    if not news_items:
+        return None
+    return news_items, (NewsSkill.get_last_query() or "news")
 
 
 def load_config():
@@ -472,9 +876,21 @@ def load_config():
             return json.load(f)
     return {}
 
+
 def save_config(config):
     with open(CONFIG_FILE, "w") as f:
         json.dump(config, f, indent=2)
+
+
+def _speaker_label():
+    """``Collig`` or ``Collig (曹操)`` while a personality is active."""
+    try:
+        from core.personality import get_personality_manager
+
+        return get_personality_manager().speaker_label()
+    except Exception:
+        return "Collig"
+
 
 def handle_backup_command():
     """Backs up user data to a zip file."""
@@ -490,7 +906,7 @@ def handle_backup_command():
     console.print(f"[bold]Backing up data from {source_dir} to {output_filename}...[/bold]")
 
     try:
-        with zipfile.ZipFile(output_filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        with zipfile.ZipFile(output_filename, "w", zipfile.ZIP_DEFLATED) as zipf:
             for root, dirs, files in os.walk(source_dir):
                 for file in files:
                     file_path = os.path.join(root, file)
@@ -501,6 +917,7 @@ def handle_backup_command():
         console.print(f"[green]Backup successful! Saved to {output_filename}[/green]")
     except Exception as e:
         console.print(f"[bold red]Backup failed:[/bold red] {e}")
+
 
 def handle_restore_command(command_parts):
     """Restores user data from a zip file (overwrite mode)."""
@@ -521,17 +938,20 @@ def handle_restore_command(command_parts):
         console.print(f"[bold red]Error:[/bold red] Not a valid zip file: {zip_path}")
         return
 
-    if not Confirm.ask(f"Are you sure you want to restore data from {zip_path}? This will overwrite current settings and memory."):
+    if not Confirm.ask(
+        f"Are you sure you want to restore data from {zip_path}? This will overwrite current settings and memory."
+    ):
         console.print("[yellow]Restore cancelled.[/yellow]")
         return
 
     console.print("[bold]Restoring data...[/bold]")
     try:
-        with zipfile.ZipFile(zip_path, 'r') as zipf:
+        with zipfile.ZipFile(zip_path, "r") as zipf:
             zipf.extractall(".")
         console.print("[green]Restore successful! Please restart the application to apply changes.[/green]")
     except Exception as e:
         console.print(f"[bold red]Restore failed:[/bold red] {e}")
+
 
 def handle_load_command(command_parts):
     """Loads/merges data from a backup zip file without overwriting existing data."""
@@ -569,6 +989,7 @@ def handle_load_command(command_parts):
             from langchain_chroma import Chroma
             from langchain_openai import OpenAIEmbeddings
             from langchain_core.documents import Document
+
             CHROMA_AVAILABLE = True
         except ImportError:
             CHROMA_AVAILABLE = False
@@ -578,7 +999,7 @@ def handle_load_command(command_parts):
         temp_dir = tempfile.mkdtemp(prefix="collig_load_")
         console.print(f"[dim]Extracting backup to temporary directory...[/dim]")
 
-        with zipfile.ZipFile(zip_path, 'r') as zipf:
+        with zipfile.ZipFile(zip_path, "r") as zipf:
             zipf.extractall(temp_dir)
 
         # Find the extracted .collig directory
@@ -623,7 +1044,23 @@ def handle_load_command(command_parts):
                     if os.path.exists(src_stats):
                         shutil.copy2(src_stats, os.path.join(paths.sessions_dir, stats_fname))
 
-        # 2. Merge ChromaDB data (bookmarks, notes, diary, memory_notes)
+        # 2. Merge local notes (notes.json) — no Chroma or embedding key needed.
+        _source_data = os.path.join(extracted_collig, "data")
+        _source_notes_json = os.path.join(_source_data, "memory_notes", "notes.json")
+        _has_notes_json = os.path.exists(_source_notes_json)
+        if _has_notes_json:
+            try:
+                console.print("[dim]Merging notes...[/dim]")
+                from skills.memory.store import NoteStore
+
+                target_notes = NoteStore(
+                    os.path.join(paths.get_skill_data_dir("memory_notes"), "notes.json")
+                )
+                merged_count["notes"] += target_notes.merge_notes(NoteStore(_source_notes_json).list())
+            except Exception as e:
+                console.print(f"[dim]Notes merge skipped: {e}[/dim]")
+
+        # 3. Merge ChromaDB data (bookmarks, diary, and pre-upgrade notes)
         if CHROMA_AVAILABLE:
             source_data = os.path.join(extracted_collig, "data")
             if os.path.exists(source_data):
@@ -645,13 +1082,21 @@ def handle_load_command(command_parts):
                     if os.path.exists(source_bookmarks):
                         try:
                             console.print("[dim]Merging bookmarks...[/dim]")
-                            target_store = Chroma(persist_directory=paths.get_skill_data_dir("bookmarks"),
-                                                 embedding_function=embeddings, collection_name="user_bookmarks")
-                            source_store = Chroma(persist_directory=source_bookmarks,
-                                                 embedding_function=embeddings, collection_name="user_bookmarks")
+                            target_store = Chroma(
+                                persist_directory=paths.get_skill_data_dir("bookmarks"),
+                                embedding_function=embeddings,
+                                collection_name="user_bookmarks",
+                            )
+                            source_store = Chroma(
+                                persist_directory=source_bookmarks,
+                                embedding_function=embeddings,
+                                collection_name="user_bookmarks",
+                            )
 
                             # Get all from source
-                            source_data_all = source_store._collection.get(include=["documents", "metadatas", "embeddings"])
+                            source_data_all = source_store._collection.get(
+                                include=["documents", "metadatas", "embeddings"]
+                            )
                             if source_data_all.get("ids"):
                                 # Get existing IDs in target
                                 target_ids = set(target_store._collection.get(include=[])["ids"])
@@ -673,48 +1118,47 @@ def handle_load_command(command_parts):
                                 if new_ids:
                                     # Add with embeddings if available
                                     if new_embeds:
-                                        target_store._collection.add(ids=new_ids, documents=new_docs,
-                                                                   metadatas=new_metas, embeddings=new_embeds)
+                                        target_store._collection.add(
+                                            ids=new_ids, documents=new_docs, metadatas=new_metas, embeddings=new_embeds
+                                        )
                                     else:
-                                        target_store._collection.add(ids=new_ids, documents=new_docs, metadatas=new_metas)
+                                        target_store._collection.add(
+                                            ids=new_ids, documents=new_docs, metadatas=new_metas
+                                        )
                                     merged_count["bookmarks"] = len(new_ids)
                         except Exception as e:
                             console.print(f"[dim]Bookmark merge skipped: {e}[/dim]")
 
-                    # Merge memory_notes
+                    # Merge pre-upgrade notes from the source Chroma collection.
+                    # They go into notes.json (the store the app now reads), not
+                    # into the target Chroma, so a quota/missing key cannot lose
+                    # them and the migration flag stays untouched.
                     source_memory = os.path.join(source_data, "memory_notes")
-                    if os.path.exists(source_memory):
+                    if os.path.exists(source_memory) and not _has_notes_json:
                         try:
                             console.print("[dim]Merging notes...[/dim]")
-                            target_store = Chroma(persist_directory=paths.get_skill_data_dir("memory_notes"),
-                                                 embedding_function=embeddings, collection_name="user_memory")
-                            source_store = Chroma(persist_directory=source_memory,
-                                                 embedding_function=embeddings, collection_name="user_memory")
+                            source_store = Chroma(
+                                persist_directory=source_memory,
+                                embedding_function=embeddings,
+                                collection_name="user_memory",
+                            )
+                            source_data_all = source_store._collection.get(
+                                include=["documents", "metadatas"]
+                            )
+                            entries = [
+                                {"id": doc_id, "content": doc, "timestamp": (meta or {}).get("timestamp", "")}
+                                for doc_id, doc, meta in zip(
+                                    source_data_all.get("ids", []),
+                                    source_data_all.get("documents", []),
+                                    source_data_all.get("metadatas", []),
+                                )
+                            ]
+                            from skills.memory.store import NoteStore
 
-                            source_data_all = source_store._collection.get(include=["documents", "metadatas", "embeddings"])
-                            if source_data_all.get("ids"):
-                                target_ids = set(target_store._collection.get(include=[])["ids"])
-
-                                new_ids = []
-                                new_docs = []
-                                new_metas = []
-                                new_embeds = []
-
-                                for i, doc_id in enumerate(source_data_all["ids"]):
-                                    if doc_id not in target_ids:
-                                        new_ids.append(doc_id)
-                                        new_docs.append(source_data_all["documents"][i])
-                                        new_metas.append(source_data_all["metadatas"][i])
-                                        if "embeddings" in source_data_all and source_data_all["embeddings"]:
-                                            new_embeds.append(source_data_all["embeddings"][i])
-
-                                if new_ids:
-                                    if new_embeds:
-                                        target_store._collection.add(ids=new_ids, documents=new_docs,
-                                                                   metadatas=new_metas, embeddings=new_embeds)
-                                    else:
-                                        target_store._collection.add(ids=new_ids, documents=new_docs, metadatas=new_metas)
-                                    merged_count["notes"] = len(new_ids)
+                            target_notes = NoteStore(
+                                os.path.join(paths.get_skill_data_dir("memory_notes"), "notes.json")
+                            )
+                            merged_count["notes"] += target_notes.merge_notes(entries)
                         except Exception as e:
                             console.print(f"[dim]Notes merge skipped: {e}[/dim]")
 
@@ -723,12 +1167,20 @@ def handle_load_command(command_parts):
                     if os.path.exists(source_diary):
                         try:
                             console.print("[dim]Merging diary entries...[/dim]")
-                            target_store = Chroma(persist_directory=paths.get_skill_data_dir("diary"),
-                                                 embedding_function=embeddings, collection_name="user_diary")
-                            source_store = Chroma(persist_directory=source_diary,
-                                                 embedding_function=embeddings, collection_name="user_diary")
+                            target_store = Chroma(
+                                persist_directory=paths.get_skill_data_dir("diary"),
+                                embedding_function=embeddings,
+                                collection_name="user_diary",
+                            )
+                            source_store = Chroma(
+                                persist_directory=source_diary,
+                                embedding_function=embeddings,
+                                collection_name="user_diary",
+                            )
 
-                            source_data_all = source_store._collection.get(include=["documents", "metadatas", "embeddings"])
+                            source_data_all = source_store._collection.get(
+                                include=["documents", "metadatas", "embeddings"]
+                            )
                             if source_data_all.get("ids"):
                                 target_ids = set(target_store._collection.get(include=[])["ids"])
 
@@ -747,15 +1199,20 @@ def handle_load_command(command_parts):
 
                                 if new_ids:
                                     if new_embeds:
-                                        target_store._collection.add(ids=new_ids, documents=new_docs,
-                                                                   metadatas=new_metas, embeddings=new_embeds)
+                                        target_store._collection.add(
+                                            ids=new_ids, documents=new_docs, metadatas=new_metas, embeddings=new_embeds
+                                        )
                                     else:
-                                        target_store._collection.add(ids=new_ids, documents=new_docs, metadatas=new_metas)
+                                        target_store._collection.add(
+                                            ids=new_ids, documents=new_docs, metadatas=new_metas
+                                        )
                                     merged_count["diary"] = len(new_ids)
                         except Exception as e:
                             console.print(f"[dim]Diary merge skipped: {e}[/dim]")
                 else:
-                    console.print("[yellow]Warning: OPENAI_API_KEY not available, skipping vector store merge.[/yellow]")
+                    console.print(
+                        "[yellow]Warning: OPENAI_API_KEY not available, skipping vector store merge.[/yellow]"
+                    )
             else:
                 console.print("[dim]No data directory found in backup.[/dim]")
         else:
@@ -784,7 +1241,9 @@ def handle_load_command(command_parts):
     except Exception as e:
         console.print(f"[bold red]Load failed:[/bold red] {e}")
         import traceback
+
         console.print(traceback.format_exc())
+
 
 def get_config_schema(agent=None):
     """
@@ -804,145 +1263,173 @@ def get_config_schema(agent=None):
     # existing config closures (config[item["key"]]) keep working exactly
     # as before.  Optional item["label"] is used only for friendly display.
     # ------------------------------------------------------------------
-    schema.append({
-        "key": "LLM_PROVIDER",
-        "label": "LLM Provider",
-        "type": "choice",
-        "default": "openai",
-        "options": ["openai", "ollama", "llama", "deepseek", "dashscope", "custom"],
-        "category": "LLM",
-        "description": "LLM provider ('custom' = any OpenAI-compatible endpoint)"
-    })
+    schema.append(
+        {
+            "key": "LLM_PROVIDER",
+            "label": "LLM Provider",
+            "type": "choice",
+            "default": "openai",
+            "options": ["openai", "ollama", "llama", "deepseek", "dashscope", "custom"],
+            "category": "LLM",
+            "description": "LLM provider ('custom' = any OpenAI-compatible endpoint)",
+        }
+    )
 
-    schema.append({
-        "key": "CUSTOM_BASE_URL",
-        "label": "Custom Base URL (https://.../v1)",
-        "type": "string",
-        "default": "",
-        "category": "LLM",
-        "description": "Base URL for the 'custom' OpenAI-compatible provider (e.g. https://my-host/v1)"
-    })
+    schema.append(
+        {
+            "key": "CUSTOM_BASE_URL",
+            "label": "Custom Base URL (https://.../v1)",
+            "type": "string",
+            "default": "",
+            "category": "LLM",
+            "description": "Base URL for the 'custom' OpenAI-compatible provider (e.g. https://my-host/v1)",
+        }
+    )
 
-    schema.append({
-        "key": "DASHSCOPE_ENDPOINT",
-        "label": "DashScope Endpoint Region",
-        "type": "choice",
-        "default": "china",
-        "options": ["china", "singapore", "international"],
-        "category": "LLM",
-        "description": "DashScope endpoint region (china / singapore / international)"
-    })
+    schema.append(
+        {
+            "key": "DASHSCOPE_ENDPOINT",
+            "label": "DashScope Endpoint Region",
+            "type": "choice",
+            "default": "china",
+            "options": ["china", "singapore", "international"],
+            "category": "LLM",
+            "description": "DashScope endpoint region (china / singapore / international)",
+        }
+    )
 
-    schema.append({
-        "key": "LLM_MODEL",
-        "label": "LLM Model",
-        "type": "string",
-        "default": "gpt-4o",
-        "category": "LLM",
-        "description": "Primary LLM model to use (e.g. gpt-4o, qwen3:8b, llama3.1) · press [m] to fetch live list and pick"
-    })
+    schema.append(
+        {
+            "key": "LLM_MODEL",
+            "label": "LLM Model",
+            "type": "string",
+            "default": "gpt-4o",
+            "category": "LLM",
+            "description": "Primary LLM model to use (e.g. gpt-4o, qwen3:8b, llama3.1) · press [m] to fetch live list and pick",
+        }
+    )
 
-    schema.append({
-        "key": "OPENAI_API_KEY",
-        "label": "OpenAI API Key",
-        "type": "secret",
-        "default": "",
-        "category": "LLM",
-        "description": "API key for provider=openai"
-    })
+    schema.append(
+        {
+            "key": "OPENAI_API_KEY",
+            "label": "OpenAI API Key",
+            "type": "secret",
+            "default": "",
+            "category": "LLM",
+            "description": "API key for provider=openai",
+        }
+    )
 
-    schema.append({
-        "key": "DEEPSEEK_API_KEY",
-        "label": "DeepSeek API Key",
-        "type": "secret",
-        "default": "",
-        "category": "LLM",
-        "description": "API key for provider=deepseek"
-    })
+    schema.append(
+        {
+            "key": "DEEPSEEK_API_KEY",
+            "label": "DeepSeek API Key",
+            "type": "secret",
+            "default": "",
+            "category": "LLM",
+            "description": "API key for provider=deepseek",
+        }
+    )
 
-    schema.append({
-        "key": "DASHSCOPE_API_KEY",
-        "label": "DashScope API Key",
-        "type": "secret",
-        "default": "",
-        "category": "LLM",
-        "description": "API key for provider=dashscope"
-    })
+    schema.append(
+        {
+            "key": "DASHSCOPE_API_KEY",
+            "label": "DashScope API Key",
+            "type": "secret",
+            "default": "",
+            "category": "LLM",
+            "description": "API key for provider=dashscope",
+        }
+    )
 
-    schema.append({
-        "key": "CUSTOM_API_KEY",
-        "label": "Custom Endpoint API Key",
-        "type": "secret",
-        "default": "",
-        "category": "LLM",
-        "description": "API key for provider=custom (optional for local servers)"
-    })
+    schema.append(
+        {
+            "key": "CUSTOM_API_KEY",
+            "label": "Custom Endpoint API Key",
+            "type": "secret",
+            "default": "",
+            "category": "LLM",
+            "description": "API key for provider=custom (optional for local servers)",
+        }
+    )
 
     # Cached list of models from last [m] fetch (readonly info row).
     # The closures still read/write config dict key normally; display is
     # overridden to show "N cached · press [m] to refresh".
-    schema.append({
-        "key": "AVAILABLE_MODELS",
-        "label": "Available Models (cached)",
-        "type": "info",
-        "default": [],
-        "category": "LLM",
-        "description": "Cached model list from last [m] refresh. Press [m] any time to re-fetch from endpoint."
-    })
+    schema.append(
+        {
+            "key": "AVAILABLE_MODELS",
+            "label": "Available Models (cached)",
+            "type": "info",
+            "default": [],
+            "category": "LLM",
+            "description": "Cached model list from last [m] refresh. Press [m] any time to re-fetch from endpoint.",
+        }
+    )
 
     # ------------------------------------------------------------------
     # UI Settings
     # ------------------------------------------------------------------
-    schema.append({
-        "key": "VERBOSE_THINKING",
-        "label": "Verbose Thinking",
-        "type": "boolean",
-        "default": True,
-        "category": "UI",
-        "description": "Show detailed thinking process"
-    })
+    schema.append(
+        {
+            "key": "VERBOSE_THINKING",
+            "label": "Verbose Thinking",
+            "type": "boolean",
+            "default": True,
+            "category": "UI",
+            "description": "Show detailed thinking process",
+        }
+    )
 
-    schema.append({
-        "key": "ENABLE_MARKDOWN",
-        "label": "Enable Markdown",
-        "type": "boolean",
-        "default": True,
-        "category": "UI",
-        "description": "Enable markdown rendering"
-    })
+    schema.append(
+        {
+            "key": "ENABLE_MARKDOWN",
+            "label": "Enable Markdown",
+            "type": "boolean",
+            "default": True,
+            "category": "UI",
+            "description": "Enable markdown rendering",
+        }
+    )
 
     # ------------------------------------------------------------------
     # Non-LLM API Keys (google maps, etc.)
     # ------------------------------------------------------------------
-    schema.append({
-        "key": "google_maps_api_key",
-        "label": "Google Maps API Key",
-        "type": "secret",
-        "default": "",
-        "category": "API Keys",
-        "description": "Google Maps API Key (for Map skill)"
-    })
+    schema.append(
+        {
+            "key": "google_maps_api_key",
+            "label": "Google Maps API Key",
+            "type": "secret",
+            "default": "",
+            "category": "API Keys",
+            "description": "Google Maps API Key (for Map skill)",
+        }
+    )
 
     # ------------------------------------------------------------------
     # Jira Skill Configuration
     # ------------------------------------------------------------------
-    schema.append({
-        "key": "JIRA_EMAIL",
-        "label": "Jira Email",
-        "type": "string",
-        "default": "",
-        "category": "JIRA",
-        "description": "Your NSW Education email for Jira API authentication"
-    })
+    schema.append(
+        {
+            "key": "JIRA_EMAIL",
+            "label": "Jira Email",
+            "type": "string",
+            "default": "",
+            "category": "JIRA",
+            "description": "Your NSW Education email for Jira API authentication",
+        }
+    )
 
-    schema.append({
-        "key": "JIRA_API_TOKEN",
-        "label": "Jira API Token",
-        "type": "secret",
-        "default": "",
-        "category": "JIRA",
-        "description": "Your Atlassian API token (get from https://id.atlassian.com/manage/api-tokens)"
-    })
+    schema.append(
+        {
+            "key": "JIRA_API_TOKEN",
+            "label": "Jira API Token",
+            "type": "secret",
+            "default": "",
+            "category": "JIRA",
+            "description": "Your Atlassian API token (get from https://id.atlassian.com/manage/api-tokens)",
+        }
+    )
 
     # Add any additional configs from agent skills
     if agent:
@@ -950,13 +1437,15 @@ def get_config_schema(agent=None):
         for skill in agent.skill_manager.skills:
             for req in skill.required_config:
                 if req not in seen_keys:
-                    schema.append({
-                        "key": req,
-                        "type": "string",
-                        "default": "",
-                        "category": "Skill: " + skill.name,
-                        "description": f"Required for {skill.name}"
-                    })
+                    schema.append(
+                        {
+                            "key": req,
+                            "type": "string",
+                            "default": "",
+                            "category": "Skill: " + skill.name,
+                            "description": f"Required for {skill.name}",
+                        }
+                    )
                     seen_keys.add(req)
 
     return schema
@@ -965,6 +1454,7 @@ def get_config_schema(agent=None):
 def interactive_config_ui(agent=None):
     """Open the provider-scoped configuration UI."""
     from core.config_ui import run_config_ui
+
     run_config_ui(agent)
 
 
@@ -1021,19 +1511,20 @@ def handle_config_command(command_parts, agent=None):
             console.print("Usage: config set [key] [value]")
             return
         key = command_parts[2]
-        value = " ".join(command_parts[3:]) # Allow spaces in value
+        value = " ".join(command_parts[3:])  # Allow spaces in value
 
         # Translate short LLM aliases (provider / llm_model / provider_url /
         # api_key / available_models) into the correct legacy storage keys
         # AND into the new unified aliases via set_llm_field.
         from core.runtime import set_llm_field, get_llm_config
+
         llm_field_map = {
-            "provider":         "provider",
-            "LLM_PROVIDER":     "provider",
-            "llm_model":        "llm_model",
-            "LLM_MODEL":        "llm_model",
-            "api_key":          "api_key",
-            "provider_url":     "provider_url",
+            "provider": "provider",
+            "LLM_PROVIDER": "provider",
+            "llm_model": "llm_model",
+            "LLM_MODEL": "llm_model",
+            "api_key": "api_key",
+            "provider_url": "provider_url",
             "LLM_PROVIDER_URL": "provider_url",
         }
         if key in llm_field_map:
@@ -1043,14 +1534,14 @@ def handle_config_command(command_parts, agent=None):
             # After writing a legacy LLM-related key directly, also sync the
             # new unified alias so reads via get_llm_config() stay consistent.
             for legacy, field in (
-                ("LLM_PROVIDER",        "provider"),
-                ("LLM_MODEL",           "llm_model"),
-                ("CUSTOM_BASE_URL",     "provider_url"),
-                ("DASHSCOPE_ENDPOINT",  "provider_url"),
-                ("OPENAI_API_KEY",      "api_key"),
-                ("DEEPSEEK_API_KEY",    "api_key"),
-                ("DASHSCOPE_API_KEY",   "api_key"),
-                ("CUSTOM_API_KEY",      "api_key"),
+                ("LLM_PROVIDER", "provider"),
+                ("LLM_MODEL", "llm_model"),
+                ("CUSTOM_BASE_URL", "provider_url"),
+                ("DASHSCOPE_ENDPOINT", "provider_url"),
+                ("OPENAI_API_KEY", "api_key"),
+                ("DEEPSEEK_API_KEY", "api_key"),
+                ("DASHSCOPE_API_KEY", "api_key"),
+                ("CUSTOM_API_KEY", "api_key"),
             ):
                 if key == legacy and config.get(legacy) is not None:
                     set_llm_field(config, field, config.get(legacy))
@@ -1082,8 +1573,7 @@ def handle_config_command(command_parts, agent=None):
             if llm_changed:
                 agent.set_provider(llm_cfg["provider"], llm_cfg["llm_model"])
                 console.print(
-                    "[green]Agent updated to use %s (%s)[/green]"
-                    % (llm_cfg["provider"], llm_cfg["llm_model"])
+                    "[green]Agent updated to use %s (%s)[/green]" % (llm_cfg["provider"], llm_cfg["llm_model"])
                 )
 
         console.print("[dim]Note: You may need to restart the session for changes to take effect in some skills.[/dim]")
@@ -1220,9 +1710,14 @@ def handle_jira_list_board(command_parts, skill, config):
     issues_sorted = sorted(issues, key=sort_key)
 
     status_icons = {
-        "To Do": "⬜", "In Progress": "🔄", "Done": "✅",
-        "Backlog": "📦", "Peer Review": "👀", "In Review": "👀",
-        "Closed": "✅", "Resolved": "✅",
+        "To Do": "⬜",
+        "In Progress": "🔄",
+        "Done": "✅",
+        "Backlog": "📦",
+        "Peer Review": "👀",
+        "In Review": "👀",
+        "Closed": "✅",
+        "Resolved": "✅",
     }
 
     jira_domain = skill.jira_domain
@@ -1246,7 +1741,13 @@ def handle_jira_list_board(command_parts, skill, config):
         issue_url = f"https://{jira_domain}/browse/{key}"
 
         if category == "done" or status_name.lower() in {
-            "done", "closed", "resolved", "complete", "completed", "cancelled", "canceled"
+            "done",
+            "closed",
+            "resolved",
+            "complete",
+            "completed",
+            "cancelled",
+            "canceled",
         }:
             done_count += 1
         else:
@@ -1260,7 +1761,9 @@ def handle_jira_list_board(command_parts, skill, config):
         icon = status_icons.get(status_name, "◻️")
         console.print(f"{icon} {key}: {summary}")
         console.print(f"   🔗 {issue_url}")
-        console.print(f"   Status: {status_name} | Priority: {priority_name} | Assignee: {assignee_name or 'Unassigned'}")
+        console.print(
+            f"   Status: {status_name} | Priority: {priority_name} | Assignee: {assignee_name or 'Unassigned'}"
+        )
 
     console.print("\n" + "=" * 60)
     console.print(f"Total: {len(issues_sorted)} issue(s)  |  Open/active: {open_count}  |  Done/closed: {done_count}")
@@ -1309,6 +1812,7 @@ def handle_jira_command(command_parts, agent=None):
     # Import and use the Jira skill directly
     try:
         from skills.jira import JiraSkill
+
         skill = JiraSkill()
         skill.configure(config)
 
@@ -1362,11 +1866,9 @@ _CONSOLE_PORT = 5005
 def _get_console_pid():
     """Find the PID of the process listening on the console port using lsof."""
     import subprocess
+
     try:
-        result = subprocess.run(
-            ["lsof", "-ti", f":{_CONSOLE_PORT}"],
-            capture_output=True, text=True, timeout=5
-        )
+        result = subprocess.run(["lsof", "-ti", f":{_CONSOLE_PORT}"], capture_output=True, text=True, timeout=5)
         if result.returncode == 0 and result.stdout.strip():
             # lsof may return multiple PIDs; return the first one
             pids = result.stdout.strip().split("\n")
@@ -1389,6 +1891,7 @@ def _clear_console_pid():
 def _is_console_running():
     """Check if Collig web is already running by probing the port."""
     import socket
+
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         s.settimeout(2)
@@ -1415,8 +1918,14 @@ def _start_console_process():
     # Determine how to run uvicorn
     core_dir = os.path.join(collig_root, "core")
     uvicorn_cmd = [
-        "uv", "run", "uvicorn", "main:app",
-        "--host", "0.0.0.0", "--port", str(_CONSOLE_PORT),
+        "uv",
+        "run",
+        "uvicorn",
+        "main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        str(_CONSOLE_PORT),
         "--reload",  # Auto-restart on file changes
     ]
 
@@ -1435,6 +1944,7 @@ def _start_console_process():
 
         # Give it time to start — uv run + uvicorn init can take a few seconds
         import time
+
         for i in range(10):
             time.sleep(1)
             if _is_console_running():
@@ -1481,12 +1991,14 @@ def _stop_console_process():
 
     try:
         import signal
+
         os.kill(pid, signal.SIGTERM)
         console.print(f"[green]Collig web stopped (PID {pid}).[/green]")
 
         # Also kill any other processes on the same port (cleanup)
         import subprocess
         import time
+
         time.sleep(0.5)
         remaining = _get_console_pid()
         if remaining:
@@ -1507,21 +2019,25 @@ def handle_console_command(user_input):
     if len(parts) < 2 or parts[1].lower() == "status":
         # Show status
         if _is_console_running():
-            console.print(Panel(
-                f"[green]● Collig web is running[/green]\n\n"
-                f"  URL: [bold cyan]http://{_CONSOLE_HOST}:{_CONSOLE_PORT}/[/bold cyan]\n"
-                f"  PID: {_get_console_pid()}\n"
-                f"  API: http://{_CONSOLE_HOST}:{_CONSOLE_PORT}/api/*",
-                title="Collig",
-                border_style="green"
-            ))
+            console.print(
+                Panel(
+                    f"[green]● Collig web is running[/green]\n\n"
+                    f"  URL: [bold cyan]http://{_CONSOLE_HOST}:{_CONSOLE_PORT}/[/bold cyan]\n"
+                    f"  PID: {_get_console_pid()}\n"
+                    f"  API: http://{_CONSOLE_HOST}:{_CONSOLE_PORT}/api/*",
+                    title="Collig",
+                    border_style="green",
+                )
+            )
         else:
-            console.print(Panel(
-                "[yellow]○ Collig web is not running[/yellow]\n\n"
-                "  Use [bold]/console start[/bold] to launch it.",
-                title="Collig",
-                border_style="yellow"
-            ))
+            console.print(
+                Panel(
+                    "[yellow]○ Collig web is not running[/yellow]\n\n"
+                    "  Use [bold]/console start[/bold] to launch it.",
+                    title="Collig",
+                    border_style="yellow",
+                )
+            )
 
     elif parts[1].lower() == "start":
         if _is_console_running():
@@ -1535,18 +2051,22 @@ def handle_console_command(user_input):
     elif parts[1].lower() == "restart":
         _stop_console_process()
         import time
+
         time.sleep(1)
         _start_console_process()
 
     elif parts[1].lower() == "open":
         """Open the Collig web URL in the default browser."""
         import webbrowser
+
         url = f"http://{_CONSOLE_HOST}:{_CONSOLE_PORT}/"
         if _is_console_running():
             webbrowser.open(url)
             console.print(f"[green]Opened Collig web in browser:[/green] {url}")
         else:
-            console.print(f"[yellow]Collig web is not running. Start it first with [bold]/console start[/bold].[/yellow]")
+            console.print(
+                f"[yellow]Collig web is not running. Start it first with [bold]/console start[/bold].[/yellow]"
+            )
             console.print(f"  URL would be: [cyan]{url}[/cyan]")
 
     else:
@@ -1583,9 +2103,15 @@ def check_setup():
         return True
     return False
 
+
 def run_setup_wizard():
     """Runs the first-time setup wizard."""
-    console.print(Panel.fit("[bold green]Welcome to Collig Co-worker AI![/bold green]\n\nIt looks like this is your first time running Collig.\nLet's get you set up.", title="Setup Wizard"))
+    console.print(
+        Panel.fit(
+            "[bold green]Welcome to Collig Co-worker AI![/bold green]\n\nIt looks like this is your first time running Collig.\nLet's get you set up.",
+            title="Setup Wizard",
+        )
+    )
 
     if Confirm.ask("Do you want to configure your OpenAI API Key now?"):
         api_key = RichPrompt.ask("Enter your OpenAI API Key", password=True)
@@ -1596,26 +2122,27 @@ def run_setup_wizard():
                 f.write("")
 
         set_key(env_file, "OPENAI_API_KEY", api_key)
-        os.environ["OPENAI_API_KEY"] = api_key # Update current session
+        os.environ["OPENAI_API_KEY"] = api_key  # Update current session
         console.print("[green]API Key saved successfully![/green]")
     else:
         console.print("[yellow]Skipping API setup. Some features may not work.[/yellow]")
 
     console.print("\n[bold]Setup Complete![/bold]\n")
 
+
 def print_banner():
     """Prints a cool ASCII art banner with a robot and typing animation."""
     import zlib
     import base64
 
-    _L = 'eJxTUHg0rQMdTZ2uwAUTnzrl0dQJSGguktREBTDAJjB1Fi5zwXIoRoJNrampweUULC6BSXIh2wxn4xLF7iigsXO5CLsK6BKcviVWAGs4Y7F4kNmNbCiRbKjBpMYrNIUh+QFZC/XiFQDYYadb'
+    _L = "eJxTUHg0rQMdTZ2uwAUTnzrl0dQJSGguktREBTDAJjB1Fi5zwXIoRoJNrampweUULC6BSXIh2wxn4xLF7iigsXO5CLsK6BKcviVWAGs4Y7F4kNmNbCiRbKjBpMYrNIUh+QFZC/XiFQDYYadb"
 
     def _d(s):
-        return zlib.decompress(base64.b64decode(s)).decode('utf-8')
+        return zlib.decompress(base64.b64decode(s)).decode("utf-8")
 
     letters = [block.split("\n") for block in _d(_L).split("|||")]
 
-    console.print() # Spacer
+    console.print()  # Spacer
 
     # Animate Wall-E driving from Right to Left
     terminal_width = console.width
@@ -1628,7 +2155,7 @@ def print_banner():
             for i in range(6):
                 fixed_lines[i] += letter_lines[i]
             # Update display as each letter arrives
-            live.update(Text('\n'.join(fixed_lines[i] for i in range(6)), style="bold #C56F52"))
+            live.update(Text("\n".join(fixed_lines[i] for i in range(6)), style="bold #C56F52"))
 
         # Final update to ensure everything is clean
         final_text = Text()
@@ -1639,6 +2166,7 @@ def print_banner():
     # Show tagline without animation for faster startup
     tagline = "Your AI Assistant for Life & Work"
     console.print(tagline, style="italic dim")
+
 
 def main():
     parser = argparse.ArgumentParser(description="Collig CLI")
@@ -1655,10 +2183,12 @@ def main():
         _early = args.prompt.strip()
         if _early.startswith("!"):
             from core.harness import run_shell_command
+
             run_shell_command(_early[1:].strip(), console)
             return
         if _early.startswith("/"):
             from core.harness import call_tool, parse_tool_command
+
             _shortcut = parse_tool_command(_early)
             if _shortcut:
                 _name, _args = _shortcut
@@ -1674,6 +2204,7 @@ def main():
     # runner without importing every skill module.
     try:
         from core.runner import get_agent
+
         console.print("[dim]Loading Collig harness...[/dim]")
         agent = get_agent()
         from skills.menu import set_menu_functions
@@ -1698,18 +2229,10 @@ def main():
     # Initialize prompt_toolkit session
     completer = SkillCommandCompleter(agent)
 
-    # Create key bindings
-    kb = KeyBindings()
-
-    # Bottom toolbar with hints
-    def get_bottom_toolbar():
-        return to_formatted_text([
-            ('bold', ' [Ctrl+C]'), ('', ' Stop  '),
-            ('bold', '[/]'), ('', ' Commands  '),
-            ('bold', '[!]'), ('', ' Shell  '),
-            ('bold', '[↑/↓]'), ('', ' History  '),
-            ('bold', '[Tab]'), ('', ' Complete')
-        ], style='class:bottom-toolbar')
+    # Create key bindings and the contextual bottom toolbar.  The toolbar
+    # switches to menu hints as soon as the "/" menu opens.
+    kb = make_prompt_key_bindings()
+    get_bottom_toolbar = make_bottom_toolbar()
 
     # Create persistent history file path.  Do not build a PromptSession for
     # --prompt runs: there is no stdin to attach it to, and prompt_toolkit
@@ -1722,18 +2245,20 @@ def main():
             completer=completer,
             complete_while_typing=True,
             key_bindings=kb,
-            bottom_toolbar=get_bottom_toolbar
+            bottom_toolbar=get_bottom_toolbar,
         )
 
     # Custom style for prompt_toolkit
-    style = Style.from_dict({
-        'prompt': 'bold ansigreen',
-        'completion-menu.completion': 'bg:#008888 #ffffff',
-        'completion-menu.completion.current': 'bg:#00aaaa #000000',
-        'scrollbar.background': 'bg:#88aaaa',
-        'scrollbar.button': 'bg:#222222',
-        'bottom-toolbar': 'bg:#222222 #aaaaaa',
-    })
+    style = Style.from_dict(
+        {
+            "prompt": "bold ansigreen",
+            "completion-menu.completion": "bg:#008888 #ffffff",
+            "completion-menu.completion.current": "bg:#00aaaa #000000",
+            "scrollbar.background": "bg:#88aaaa",
+            "scrollbar.button": "bg:#222222",
+            "bottom-toolbar": "bg:#222222 #aaaaaa",
+        }
+    )
 
     session_id = args.session
     if session_id:
@@ -1752,6 +2277,10 @@ def main():
         session_id = agent.session_manager.create_session()
         console.print(f"[bold cyan]New session started: {session_id}[/bold cyan]")
 
+    # Skills that keep per-conversation state (news cache) read this.  It is
+    # how /read_news_item can find the list from a resumed conversation.
+    os.environ["COLLIG_SESSION_ID"] = str(session_id)
+
     # Handle non-interactive mode (--prompt)
     if args.prompt:
         console.print(f"[bold cyan]Session: {session_id}[/bold cyan]\n")
@@ -1760,22 +2289,33 @@ def main():
         # Same shortcuts as the interactive loop, so scripts can use them.
         if prompt_text.startswith("!"):
             from core.harness import run_shell_command
+
             run_shell_command(prompt_text[1:].strip(), console)
             return
         if prompt_text.startswith("/"):
             from core.harness import call_tool, parse_tool_command
+
             shortcut = parse_tool_command(prompt_text)
             if shortcut:
                 tool_name, tool_args = shortcut
                 console.print(f"[dim]Direct tool: {tool_name} · 0 model tokens[/dim]")
                 console.print(call_tool(tool_name, tool_args))
                 return
+            from core.commands import handle_slash_command
+
+            meta_output = handle_slash_command(
+                prompt_text,
+                progress=lambda message: console.print(f"[dim]{message}[/dim]"),
+            )
+            if meta_output is not None:
+                console.print(meta_output, markup=False, highlight=False)
+                return
         try:
             # Process the prompt using agent's process_message method
             result = agent.process_message(args.prompt, session_id)
             # result is a dict with "response" key
             response = result.get("response", "No response") if isinstance(result, dict) else result
-            console.print(f"[bold blue]Collig:[/bold blue] {response}")
+            console.print(f"[bold blue]{_speaker_label()}:[/bold blue] {response}")
             # Print token stats if available
             if isinstance(result, dict) and "total_tokens" in result:
                 console.print(f"\n[dim]Tokens: {result.get('total_tokens', 'N/A')} total[/dim]")
@@ -1787,11 +2327,23 @@ def main():
     console.print("Type [bold yellow]'exit'[/bold yellow] or [bold yellow]'quit'[/bold yellow] to end the session.")
     console.print("Press [bold yellow]Ctrl+C[/bold yellow] to cancel current operation while thinking.")
     console.print(
+        "Type [bold cyan]/[/bold cyan] for the command menu, then [bold]↑/↓[/bold] to navigate, "
+        "[bold]Tab[/bold] or [bold]Space[/bold] to complete, and [bold]Enter[/bold] to run. "
+        "For a command with a parameter, press [bold]Space[/bold] and type the argument. "
+        "[dim](Ctrl+P/Ctrl+N always scroll history.)[/dim]"
+    )
+    console.print(
         "Use [bold cyan]/config[/bold cyan] for settings, [bold cyan]!<cmd>[/bold cyan] for a shell command, "
         "or [bold cyan]/<tool>[/bold cyan] to call a tool directly.\n"
     )
+    console.print(
+        "Try [bold cyan]/memory[/bold cyan] to see what Collig remembers, "
+        "[bold cyan]/distill <person>[/bold cyan] to build a personality, and "
+        "[bold cyan]/chatto <person>[/bold cyan] to talk as it.\n"
+    )
 
     import sys
+
     console.print(
         f"[dim]Harness ready · {len(agent.skill_manager.skills)} skills registered lazily · "
         f"{len(agent.tools)} tools catalogued[/dim]"
@@ -1803,18 +2355,21 @@ def main():
     while True:
         try:
             # Use prompt_toolkit's session.prompt() for history navigation
-            user_input = pt_session.prompt([('class:prompt', 'You: ')], style=style)
+            user_input = pt_session.prompt([("class:prompt", "You: ")], style=style)
 
             # Shell escape: "! pwd" runs the command directly, like Claude Code.
             if user_input.startswith("!"):
                 from core.harness import run_shell_command
+
                 run_shell_command(user_input[1:].strip(), console)
                 continue
 
             # Deterministic tool shortcut: "/get_current_time" calls the tool
             # directly, with no model round-trip and no tool schemas.
+            slash_command = user_input.startswith("/")
             if user_input.startswith("/"):
                 from core.harness import call_tool, parse_tool_command
+
                 shortcut = parse_tool_command(user_input)
                 if shortcut:
                     tool_name, tool_args = shortcut
@@ -1832,14 +2387,37 @@ def main():
                 # Remove slash if it's there
                 user_input = user_input[1:]
 
+            # Meta commands that do not need a model turn: /distill, /chatto,
+            # /personality and /memory.  Handled before the model so they work
+            # even when no provider is configured yet.
+            if slash_command:
+                from core.commands import handle_slash_command
+
+                def _meta_progress(message: str) -> None:
+                    console.print(f"[dim]{message}[/dim]")
+
+                meta_output = handle_slash_command("/" + user_input, progress=_meta_progress)
+                if meta_output is not None:
+                    console.print(meta_output, markup=False, highlight=False)
+                    if session_id and meta_output:
+                        try:
+                            agent.session_manager.add_message(session_id, "user", "/" + user_input)
+                            agent.session_manager.add_message(session_id, "ai", meta_output)
+                        except Exception:
+                            pass
+                    console.print()
+                    continue
+
             if user_input.lower() in ["exit", "quit"]:
-                console.print(Panel(
-                    f"Session ID: [bold cyan]{session_id}[/bold cyan]\n\n"
-                    f"To resume this session later, run:\n"
-                    f"[green]make pa session={session_id}[/green]",
-                    title="Goodbye!",
-                    border_style="green"
-                ))
+                console.print(
+                    Panel(
+                        f"Session ID: [bold cyan]{session_id}[/bold cyan]\n\n"
+                        f"To resume this session later, run:\n"
+                        f"[green]make pa session={session_id}[/green]",
+                        title="Goodbye!",
+                        border_style="green",
+                    )
+                )
                 break
 
             if not user_input.strip():
@@ -1857,15 +2435,12 @@ def main():
                 else:
                     cmd_to_run = cmd_parts[1]
                     import subprocess
+
                     try:
                         console.print(f"[dim]Running: {cmd_to_run}[/dim]")
                         # Run command and stream output
                         process = subprocess.Popen(
-                            cmd_to_run,
-                            shell=True,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE,
-                            text=True
+                            cmd_to_run, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
                         )
                         stdout, stderr = process.communicate()
 
@@ -1880,11 +2455,13 @@ def main():
 
             if user_input.lower() == "restart":
                 # Restart the application with the same session ID
-                console.print(Panel(
-                    f"[bold cyan]Restarting session {session_id}...[/bold cyan]",
-                    title="Restarting",
-                    border_style="yellow"
-                ))
+                console.print(
+                    Panel(
+                        f"[bold cyan]Restarting session {session_id}...[/bold cyan]",
+                        title="Restarting",
+                        border_style="yellow",
+                    )
+                )
                 # Use os.execv to replace the current process
                 # We need to reconstruct the command line arguments
                 # The original command was likely "make pa session=..." or "python backend/cli.py ..."
@@ -1944,7 +2521,6 @@ def main():
                         entry = searches[0]
                         NewsSkill._news_cache = entry.news_items
                         NewsSkill._last_query = entry.query
-                        NewsSkill._just_searched = True
                         NewsSkill._current_cache_id = entry.cache_id
                         console.print(f"[green]Loaded most recent cached search: {entry.query}[/green]")
                         browse_news_items(entry.news_items, entry.query, agent)
@@ -1965,7 +2541,6 @@ def main():
                             continue
                         NewsSkill._news_cache = entry.news_items
                         NewsSkill._last_query = entry.query
-                        NewsSkill._just_searched = True
                         NewsSkill._current_cache_id = entry.cache_id
                         console.print(f"[green]Loaded: {entry.query}[/green]")
                         browse_news_items(entry.news_items, entry.query, agent)
@@ -1977,7 +2552,9 @@ def main():
                             console.print("[yellow]No cached news searches yet.[/yellow]")
                             continue
                         for i, entry in enumerate(searches, 1):
-                            console.print(f"  {i}. {entry.get_display_title()} [dim]({len(entry.news_items)} items)[/dim]")
+                            console.print(
+                                f"  {i}. {entry.get_display_title()} [dim]({len(entry.news_items)} items)[/dim]"
+                            )
                         console.print("[dim]Use /news load <number> to reopen one.[/dim]")
                         continue
 
@@ -2004,7 +2581,7 @@ def main():
                                 title=entry.query,
                                 subtitle=entry.timestamp[:16].replace("T", " "),
                                 data=entry,
-                                detail=f"Query: {entry.query}\nDate: {entry.timestamp}\nItems: {len(entry.news_items)} articles"
+                                detail=f"Query: {entry.query}\nDate: {entry.timestamp}\nItems: {len(entry.news_items)} articles",
                             )
                             menu_items.append(menu_item)
 
@@ -2013,7 +2590,7 @@ def main():
                             title="📰 Saved News Searches",
                             subtitle="Select a search to load",
                             items=menu_items,
-                            stay_open=False  # Exit after selection
+                            stay_open=False,  # Exit after selection
                         )
 
                         # Add "Delete" action
@@ -2024,12 +2601,9 @@ def main():
                             # Don't remove from list - just exit and refresh
                             return "delete"
 
-                        cache_menu.add_action(MenuAction(
-                            key="d",
-                            label="Delete",
-                            callback=delete_search_action,
-                            modes=["list", "detail"]
-                        ))
+                        cache_menu.add_action(
+                            MenuAction(key="d", label="Delete", callback=delete_search_action, modes=["list", "detail"])
+                        )
 
                         # Run the menu
                         result = cache_menu.run()
@@ -2041,15 +2615,9 @@ def main():
                             # Load the news into NewsSkill
                             NewsSkill._news_cache = entry.news_items
                             NewsSkill._last_query = entry.query
-                            NewsSkill._just_searched = True
                             console.print(f"[green]Loaded: {entry.query}[/green]")
                             # Open the news browser
-                            while True:
-                                news_action = interactive_news_menu(entry.news_items, entry.query)
-                                if news_action:
-                                    handle_news_action(news_action, agent)
-                                else:
-                                    break
+                            browse_news_items(entry.news_items, entry.query, agent)
                         continue
 
                     # Regular /news: browse the current list. If this process
@@ -2061,7 +2629,6 @@ def main():
                         entry = searches[0]
                         NewsSkill._news_cache = entry.news_items
                         NewsSkill._last_query = entry.query
-                        NewsSkill._just_searched = True
                         NewsSkill._current_cache_id = entry.cache_id
                         news_cache = entry.news_items
                         news_query = entry.query
@@ -2070,7 +2637,9 @@ def main():
                         browse_news_items(news_cache, news_query, agent)
                     else:
                         console.print("[yellow]No news items available. Try /search_news <query> first.[/yellow]")
-                        console.print("[dim]Tip: /news cached browses saved searches; /news last reopens the newest one.[/dim]")
+                        console.print(
+                            "[dim]Tip: /news cached browses saved searches; /news last reopens the newest one.[/dim]"
+                        )
                 except Exception as e:
                     console.print(f"[red]Error opening news menu: {e}[/red]")
                 continue
@@ -2092,12 +2661,14 @@ def main():
                     console.print(f"[dim]Fetching models from provider '{target_provider}'...[/dim]")
                     try:
                         from core.runtime import fetch_provider_models
+
                         cfg = load_config()
                         models = fetch_provider_models(target_provider, cfg)
                         default_idx = models.index(agent.llm_model) if agent.llm_model in models else 0
                         idx = interactive_menu(
                             f"Select a model for '{target_provider}' (Enter to choose, q to cancel)",
-                            models, default_idx
+                            models,
+                            default_idx,
                         )
                         if idx is not None and idx >= 0:
                             chosen = models[idx]
@@ -2182,10 +2753,18 @@ def main():
                         elif prompt_chars > 1:
                             prompt_chars -= 1
                     return (
-                        "[cyan]" + "█" * prompt_chars + "[/cyan]" +
-                        "[green]" + "█" * completion_chars + "[/green]" +
-                        " " * (width - prompt_chars - completion_chars)
-                    ), prompt_pct, completion_pct
+                        (
+                            "[cyan]"
+                            + "█" * prompt_chars
+                            + "[/cyan]"
+                            + "[green]"
+                            + "█" * completion_chars
+                            + "[/green]"
+                            + " " * (width - prompt_chars - completion_chars)
+                        ),
+                        prompt_pct,
+                        completion_pct,
+                    )
 
                 sections = []
 
@@ -2213,9 +2792,9 @@ def main():
                             last_str = session_stats["last_interaction"]
                             duration_str = "unknown"
 
-                        total_tokens = session_stats['total_tokens']
-                        prompt_tokens = session_stats['total_prompt_tokens']
-                        completion_tokens = session_stats['total_completion_tokens']
+                        total_tokens = session_stats["total_tokens"]
+                        prompt_tokens = session_stats["total_prompt_tokens"]
+                        completion_tokens = session_stats["total_completion_tokens"]
                         bar, prompt_pct, completion_pct = render_bar(prompt_tokens, completion_tokens, total_tokens)
 
                         session_section = f"""  [bold cyan]Session Stats[/bold cyan]  [dim]────────────────────────────────────────────────[/dim]
@@ -2254,9 +2833,9 @@ def main():
                             last_str = overall_stats["last_interaction"]
                             duration_str = "unknown"
 
-                        total_tokens = overall_stats['total_tokens']
-                        prompt_tokens = overall_stats['total_prompt_tokens']
-                        completion_tokens = overall_stats['total_completion_tokens']
+                        total_tokens = overall_stats["total_tokens"]
+                        prompt_tokens = overall_stats["total_prompt_tokens"]
+                        completion_tokens = overall_stats["total_completion_tokens"]
                         bar, prompt_pct, completion_pct = render_bar(prompt_tokens, completion_tokens, total_tokens)
 
                         overall_section = f"""  [bold yellow]Overall Stats[/bold yellow]  [dim]─────────────────────────────────────────────[/dim]
@@ -2284,7 +2863,13 @@ def main():
                         sections.append(overall_section)
 
                 if not sections:
-                    console.print(Panel("No token usage data yet. Start a conversation!", title="Token Statistics", border_style="dim"))
+                    console.print(
+                        Panel(
+                            "No token usage data yet. Start a conversation!",
+                            title="Token Statistics",
+                            border_style="dim",
+                        )
+                    )
                 else:
                     # Join sections with a divider
                     divider = "\n  [dim]────────────────────────────────────────────────────────────[/dim]\n"
@@ -2295,12 +2880,19 @@ def main():
                 continue
 
             if user_input.startswith("status"):
-                console.print(Panel(f"[bold]System Status[/bold]\nChecking connection to {agent.llm_provider}...", title="Status Check"))
+                console.print(
+                    Panel(
+                        f"[bold]System Status[/bold]\nChecking connection to {agent.llm_provider}...",
+                        title="Status Check",
+                    )
+                )
 
                 # Check 1: Provider Config
                 console.print(f"• Provider: [cyan]{agent.llm_provider}[/cyan]")
                 console.print(f"• Model: [cyan]{agent.llm_model}[/cyan]")
-                console.print(f"• Markdown: {'[green]enabled[/green]' if ENABLE_MARKDOWN else '[yellow]disabled[/yellow]'}")
+                console.print(
+                    f"• Markdown: {'[green]enabled[/green]' if ENABLE_MARKDOWN else '[yellow]disabled[/yellow]'}"
+                )
 
                 # Check 2: API Key / Connection
                 status = "[green]OK[/green]"
@@ -2343,6 +2935,7 @@ def main():
                 elif agent.llm_provider == "ollama" or agent.llm_provider == "llama":
                     # Check if ollama is running
                     import subprocess
+
                     try:
                         subprocess.run(["ollama", "--version"], capture_output=True, check=True)
                     except:
@@ -2362,7 +2955,7 @@ def main():
                         endpoints = {
                             "china": "https://dashscope.aliyuncs.com",
                             "singapore": "https://dashscope-intl.aliyuncs.com",
-                            "international": "https://dashscope-intl.aliyuncs.com"
+                            "international": "https://dashscope-intl.aliyuncs.com",
                         }
                         endpoint_url = endpoints.get(endpoint, endpoints["china"])
                         console.print(f"  ➜ Endpoint: [cyan]{endpoint}[/cyan] ({endpoint_url})")
@@ -2387,14 +2980,19 @@ def main():
                             else:
                                 console.print(f"• LLM Connection: [yellow]WARNING[/yellow] (Empty response)")
                         else:
-                             console.print("• LLM Connection: [red]FAILED[/red] (Agent not initialized)")
+                            console.print("• LLM Connection: [red]FAILED[/red] (Agent not initialized)")
                     except Exception as e:
                         console.print(f"• LLM Connection: [red]FAILED[/red] ({e})")
 
                 continue
 
             if user_input.startswith("doctor") or user_input.startswith("test"):
-                console.print(Panel(f"[bold]System Doctor[/bold]\nChecking connection to {agent.llm_provider}...", title="Health Check"))
+                console.print(
+                    Panel(
+                        f"[bold]System Doctor[/bold]\nChecking connection to {agent.llm_provider}...",
+                        title="Health Check",
+                    )
+                )
 
                 # Check 1: Provider Config
                 console.print(f"• Provider: [cyan]{agent.llm_provider}[/cyan]")
@@ -2415,6 +3013,7 @@ def main():
                 elif agent.llm_provider == "ollama" or agent.llm_provider == "llama":
                     # Check if ollama is running
                     import subprocess
+
                     try:
                         subprocess.run(["ollama", "--version"], capture_output=True, check=True)
                     except:
@@ -2434,7 +3033,7 @@ def main():
                         endpoints = {
                             "china": "https://dashscope.aliyuncs.com",
                             "singapore": "https://dashscope-intl.aliyuncs.com",
-                            "international": "https://dashscope-intl.aliyuncs.com"
+                            "international": "https://dashscope-intl.aliyuncs.com",
                         }
                         endpoint_url = endpoints.get(endpoint, endpoints["china"])
                         console.print(f"  ➜ Endpoint: [cyan]{endpoint}[/cyan] ({endpoint_url})")
@@ -2467,7 +3066,7 @@ def main():
                             else:
                                 console.print(f"• LLM Connection: [yellow]WARNING[/yellow] (Empty response)")
                         else:
-                             console.print("• LLM Connection: [red]FAILED[/red] (Agent not initialized)")
+                            console.print("• LLM Connection: [red]FAILED[/red] (Agent not initialized)")
                     except Exception as e:
                         console.print(f"• LLM Connection: [red]FAILED[/red] ({e})")
 
@@ -2489,6 +3088,16 @@ def main():
                 handle_console_command(user_input)
                 continue
 
+            # News browsing is scoped to the turn that requested it.  Drop any
+            # leftover request (for example from an interrupted turn) so this
+            # answer cannot reopen the news browser by surprise.
+            try:
+                from skills.news import NewsSkill
+
+                NewsSkill.clear_search_flag()
+            except Exception:
+                pass
+
             # Inner try-except for agent processing - can be interrupted with Ctrl+C
             result = None
             response_buffer = []
@@ -2497,7 +3106,7 @@ def main():
             def stream_callback(token, token_type):
                 nonlocal response_started, response_buffer
                 if token_type == "start":
-                    console.print("[bold blue]Collig:[/bold blue] ", end="")
+                    console.print(f"[bold blue]{_speaker_label()}:[/bold blue] ", end="")
                     response_started = True
                 elif token_type == "token" and token:
                     response_buffer.append(token)
@@ -2507,17 +3116,16 @@ def main():
                     console.print()  # Newline at end
 
             try:
-                # Show tool count to set expectations (especially for Ollama)
+                # The catalogue is large, but SkillToolset sends only the
+                # handful relevant to this turn.  Say that precisely: the old
+                # "Using 61 tools..." line made a failed tool lookup look like
+                # the tool should have been available.
                 tool_count = len(agent.tools)
                 if tool_count > 20:
-                    console.print(f"[dim]Using {tool_count} tools...[/dim]")
+                    console.print(f"[dim]{tool_count} tools registered · selecting per turn...[/dim]")
 
                 # Use streaming version
-                result = agent.process_message_stream(
-                    user_input,
-                    session_id=session_id,
-                    token_callback=stream_callback
-                )
+                result = agent.process_message_stream(user_input, session_id=session_id, token_callback=stream_callback)
             except KeyboardInterrupt:
                 console.print("\n[yellow]Operation cancelled. Returning to prompt...[/yellow]\n")
                 continue
@@ -2533,7 +3141,7 @@ def main():
                     markdown_patterns = ["**", "#", "[", "- ", "1.", "```", "___"]
                     if ENABLE_MARKDOWN and any(pattern in response for pattern in markdown_patterns):
                         # Render as markdown
-                        console.print("[bold blue]Collig:[/bold blue]")
+                        console.print(f"[bold blue]{_speaker_label()}:[/bold blue]")
                         try:
                             console.print(Markdown(response))
                         except Exception:
@@ -2541,7 +3149,7 @@ def main():
                             console.print(response)
                     else:
                         # Render as plain text
-                        console.print(f"[bold blue]Collig:[/bold blue] {response}")
+                        console.print(f"[bold blue]{_speaker_label()}:[/bold blue] {response}")
                 elif response_started:
                     # We already streamed it, just add a newline
                     console.print()
@@ -2551,7 +3159,9 @@ def main():
                 completion_tokens = result.get("completion_tokens", 0)
                 total_tokens = result.get("total_tokens", 0)
                 if prompt_tokens > 0 or completion_tokens > 0:
-                    console.print(f"[dim](Request: {prompt_tokens}, Response: {completion_tokens}, Total: {total_tokens})[/dim]")
+                    console.print(
+                        f"[dim](Request: {prompt_tokens}, Response: {completion_tokens}, Total: {total_tokens})[/dim]"
+                    )
 
                 if action:
                     console.print(f"[dim italic]Action triggered: {action}[/dim italic]")
@@ -2561,49 +3171,34 @@ def main():
                         url = data.get("url")
                         if url:
                             import webbrowser
+
                             try:
                                 webbrowser.open(url)
                                 console.print(f"[green]Creating browser tab for: {url}[/green]")
                             except Exception as e:
                                 console.print(f"[red]Failed to open browser: {e}[/red]")
 
-                # Check if news was just searched - open interactive menu directly
-                try:
-                    from skills.news import NewsSkill
-                    news_cache = NewsSkill.get_news_cache()
+                # Hint at the browser only when this turn actually searched or
+                # loaded news.  A cached search from earlier in the session
+                # must not hijack an unrelated answer (the old code also
+                # matched the word "news" in any response, which fired on
+                # questions like "what's the weather tomorrow?" whenever a
+                # cached search happened to be in memory).
+                #
+                # The browser itself is never opened from here.  It is modal:
+                # opening it on its own replaces the prompt with the list and
+                # waits for Esc, so the chat input appears to vanish.  The
+                # user opens it deliberately with /news (last|cached|load).
+                pending_browse = pop_pending_news_browse()
+                if pending_browse:
+                    console.print()
+                    console.print(f"[dim]{news_browse_hint(pending_browse[0])}[/dim]")
 
-                    # Open news browser if:
-                    # 1. NewsSkill flag is set (search_news tool was called), OR
-                    # 2. There are news items in cache and response mentions news items
-                    should_open_news_menu = False
-
-                    if NewsSkill.has_just_searched():
-                        NewsSkill.clear_search_flag()
-                        should_open_news_menu = True
-                    elif news_cache and result and "news" in result.get("response", "").lower():
-                        # Agent mentioned news in response, check if we have cached items
-                        should_open_news_menu = True
-
-                    if should_open_news_menu and news_cache:
-                        console.print()
-                        news_query = NewsSkill.get_last_query() or "news"
-                        # Keep menu open until user quits
-                        while True:
-                            news_action = interactive_news_menu(news_cache, news_query)
-                            if news_action:
-                                handle_news_action(news_action, agent)
-                            else:
-                                # User quit the menu
-                                break
-                except Exception as e:
-                    # If news menu fails, just continue quietly
-                    pass
-
-                console.print() # Empty line for spacing
+                console.print()  # Empty line for spacing
 
         except KeyboardInterrupt:
             # Double Ctrl+C to exit
-            console.print("\n[bold blue]Collig:[/bold blue] Goodbye!")
+            console.print(f"\n[bold blue]{_speaker_label()}:[/bold blue] Goodbye!")
             break
         except EOFError:
             # Piped stdin / Ctrl+D: leave cleanly instead of printing an
@@ -2611,6 +3206,7 @@ def main():
             break
         except Exception as e:
             console.print(f"[bold red]Error:[/bold red] {str(e)}")
+
 
 if __name__ == "__main__":
     main()

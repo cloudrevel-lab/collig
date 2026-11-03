@@ -19,12 +19,14 @@ class NewsCacheEntry:
         query: str,
         news_items: List[Dict[str, Any]],
         timestamp: str = None,
-        cache_id: str = None
+        cache_id: str = None,
+        session_id: str = None,
     ):
         self.query = query
         self.news_items = news_items
         self.timestamp = timestamp or datetime.now().isoformat()
         self.cache_id = cache_id or self._generate_id()
+        self.session_id = session_id or ""
 
     def _generate_id(self) -> str:
         """Generate a unique ID for this cache entry."""
@@ -36,7 +38,8 @@ class NewsCacheEntry:
             "cache_id": self.cache_id,
             "query": self.query,
             "timestamp": self.timestamp,
-            "news_items": self.news_items
+            "session_id": self.session_id,
+            "news_items": self.news_items,
         }
 
     @classmethod
@@ -46,14 +49,15 @@ class NewsCacheEntry:
             query=data["query"],
             news_items=data["news_items"],
             timestamp=data["timestamp"],
-            cache_id=data["cache_id"]
+            cache_id=data["cache_id"],
+            session_id=data.get("session_id", ""),
         )
 
     def get_display_title(self) -> str:
         """Get a human-readable title for display."""
         dt = datetime.fromisoformat(self.timestamp)
         time_str = dt.strftime("%b %d, %Y %H:%M")
-        return f"\"{self.query}\" ({time_str})"
+        return f'"{self.query}" ({time_str})'
 
 
 class NewsCacheManager:
@@ -72,10 +76,21 @@ class NewsCacheManager:
             try:
                 with open(self._cache_file, "r") as f:
                     data = json.load(f)
-                    self._cached_entries = [
-                        NewsCacheEntry.from_dict(entry)
-                        for entry in data
-                    ]
+                    loaded = [NewsCacheEntry.from_dict(entry) for entry in data]
+                # Older versions inserted a new row for every search.  Keep
+                # the newest row per query so /news ls is useful, without
+                # touching the article contents.
+                seen = set()
+                unique = []
+                for entry in loaded:
+                    key = ((entry.query or "").strip().lower(), entry.session_id or "")
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    unique.append(entry)
+                self._cached_entries = unique
+                if len(unique) != len(loaded):
+                    self._save_cache()
             except Exception:
                 self._cached_entries = []
 
@@ -88,43 +103,41 @@ class NewsCacheManager:
         except Exception as e:
             print(f"[dim]Warning: Failed to save news cache: {e}[/dim]")
 
-    @staticmethod
-    def _item_urls(news_items: List[Dict[str, Any]]) -> List[str]:
-        urls = []
-        for item in news_items or []:
-            url = str(item.get("url") or "").strip()
-            if url:
-                urls.append(url)
-        return urls
-
-    def save_search(self, query: str, news_items: List[Dict[str, Any]]) -> str:
+    def save_search(self, query: str, news_items: List[Dict[str, Any]], session_id: str = None) -> str:
         """
         Save a news search to cache.
 
-        Identical searches (same query and same article URLs) update the
-        existing entry instead of creating a duplicate.  Re-running a search
-        after a few minutes is common, and duplicate rows make the cached
-        list hard to browse.
+        A repeat of the same query in the same session updates the existing
+        entry (so /news ls stays clean).  Different sessions keep separate
+        entries, which lets /read_news_item resume the list from the
+        conversation the user actually restarted.
 
         Args:
             query: The search query
             news_items: List of news items
+            session_id: Optional owning conversation/session
 
         Returns:
             The cache ID of the saved entry
         """
         wanted = (query or "").strip().lower()
-        new_urls = self._item_urls(news_items)
+        wanted_session = (session_id or "").strip()
         for existing in self._cached_entries:
             if (existing.query or "").strip().lower() != wanted:
                 continue
-            if self._item_urls(existing.news_items) == new_urls:
-                existing.news_items = news_items
-                existing.timestamp = datetime.now().isoformat()
-                self._save_cache()
-                return existing.cache_id
+            existing_session = (existing.session_id or "").strip()
+            if wanted_session and existing_session and existing_session != wanted_session:
+                continue
+            existing.news_items = news_items
+            existing.timestamp = datetime.now().isoformat()
+            if wanted_session:
+                existing.session_id = wanted_session
+            self._cached_entries.remove(existing)
+            self._cached_entries.insert(0, existing)
+            self._save_cache()
+            return existing.cache_id
 
-        entry = NewsCacheEntry(query=query, news_items=news_items)
+        entry = NewsCacheEntry(query=query, news_items=news_items, session_id=wanted_session)
         self._cached_entries.insert(0, entry)  # Add to beginning (most recent first)
 
         # Keep only the last 50 searches
@@ -134,9 +147,11 @@ class NewsCacheManager:
         self._save_cache()
         return entry.cache_id
 
-    def get_all_searches(self) -> List[NewsCacheEntry]:
-        """Get all cached searches."""
-        return self._cached_entries.copy()
+    def get_all_searches(self, session_id: str = None) -> List[NewsCacheEntry]:
+        """Get cached searches, optionally limited to one session."""
+        if not session_id:
+            return self._cached_entries.copy()
+        return [entry for entry in self._cached_entries if not entry.session_id or entry.session_id == session_id]
 
     def get_search(self, cache_id: str) -> Optional[NewsCacheEntry]:
         """Get a specific cached search by ID."""
@@ -145,8 +160,12 @@ class NewsCacheManager:
                 return entry
         return None
 
-    def get_most_recent(self) -> Optional[NewsCacheEntry]:
-        """Get the most recent cached search."""
+    def get_most_recent(self, session_id: str = None) -> Optional[NewsCacheEntry]:
+        """Get the most recent cached search, preferring one session."""
+        if session_id:
+            for entry in self._cached_entries:
+                if entry.session_id == session_id:
+                    return entry
         if self._cached_entries:
             return self._cached_entries[0]
         return None
