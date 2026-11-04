@@ -1,74 +1,146 @@
 """
-Diary Skill - Allows keeping diary entries and journaling.
+Diary Skill - local journaling that does not depend on an embedding provider.
+
+Entries are stored in a small JSON file (see skills/diary/store.py).  The old
+Chroma collection is read once without constructing OpenAIEmbeddings and
+imported, so existing diary entries remain visible even when the embedding
+account is out of credits or no OpenAI key is configured.
 """
-from typing import List, Dict, Any
+
+from __future__ import annotations
+
 import datetime
+import logging
 import os
-from langchain_core.tools import tool, BaseTool
+from typing import Any, Dict, List, Optional
+
+from langchain_core.tools import BaseTool, tool
+
 from skills.base import Skill
+from skills.diary.store import DiaryStore
 
-# Heavy vector-store dependencies (langchain_chroma pulls in chromadb, ~0.6s)
-# are imported lazily via ``_load_vectorstore_deps`` so importing this module
-# at startup stays cheap. They are only needed once a diary entry is stored/searched is actually
-# used, which happens well after the CLI is interactive.
-Chroma = None
-OpenAIEmbeddings = None
-Document = None
+logger = logging.getLogger(__name__)
 
 
-def _load_vectorstore_deps():
-    """Import Chroma/OpenAIEmbeddings/Document on first use. Returns True on success."""
-    global Chroma, OpenAIEmbeddings, Document
-    if Chroma is not None:
-        return True
+def _default_diary_path() -> str:
     try:
-        from langchain_openai import OpenAIEmbeddings as _OE
-        from langchain_chroma import Chroma as _C
-        from langchain_core.documents import Document as _D
-        OpenAIEmbeddings, Chroma, Document = _OE, _C, _D
-        return True
-    except ImportError:
-        return False
+        from core.paths import paths
+
+        folder = paths.get_skill_data_dir("diary")
+    except Exception:
+        folder = os.path.join(os.path.expanduser("~"), ".collig", "data", "diary")
+    return os.path.join(folder, "diary.json")
 
 
 class DiarySkill(Skill):
     """Provides diary and journaling capabilities."""
 
-    def __init__(self, skill_root=None):
+    def __init__(self, skill_root=None, entry_store_path: Optional[str] = None):
         super().__init__(skill_root)
         self.vectorstore = None
+        self._entries: Optional[DiaryStore] = None
+        self._entry_store_path = entry_store_path
         self._initialized = False
+        self._migration_enabled = entry_store_path is None
 
     def configure(self, config: Dict[str, Any]):
-        """Configure the skill and initialize the vector store."""
         super().configure(config)
+        self._initialized = False
+        self._entry_store()
         self._initialize_store()
 
-    def _initialize_store(self):
-        """Initialize the diary vector store if configuration is available."""
-        if self._initialized and self.vectorstore is not None:
+    # ------------------------------------------------------------------
+    # Storage
+    # ------------------------------------------------------------------
+
+    def _entry_store(self) -> DiaryStore:
+        if self._entries is None:
+            self._entries = DiaryStore(self._entry_store_path or _default_diary_path())
+        return self._entries
+
+    def store_entry(self, content: str, date: Optional[str] = None) -> Dict[str, Any]:
+        return self._entry_store().add(content, date=date)
+
+    def recent_entries(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        return self._entry_store().list(limit=limit)
+
+    def list_entries(
+        self,
+        limit: Optional[int] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        return self._entry_store().list(limit=limit, start_date=start_date, end_date=end_date)
+
+    def get_entry(self, entry_id: str) -> Optional[Dict[str, Any]]:
+        return self._entry_store().get(entry_id)
+
+    def edit_entry(self, entry_id: str, content: str, date: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        return self._entry_store().update(entry_id, content, date=date)
+
+    def remove_entries(self, entry_ids: List[str]) -> int:
+        return self._entry_store().delete(entry_ids)
+
+    def search_entries(self, query: str, limit: int = 5) -> List[Dict[str, Any]]:
+        return self._entry_store().search(query, limit=limit)
+
+    def _initialize_store(self) -> None:
+        """Import the legacy Chroma diary once, without needing embeddings."""
+        if self._initialized:
             return
-
-        self._initialized = False
-        api_key = self.config.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
-
-        if not api_key or not _load_vectorstore_deps():
+        self._initialized = True
+        store = self._entry_store()
+        if not self._migration_enabled or store.legacy_imported():
             return
-
+        entries = self._legacy_chroma_entries()
+        if entries is None:
+            # chromadb is unavailable; retry on a later configure, but never
+            # block normal JSON saves.
+            self._initialized = False
+            return
         try:
-            self.embeddings = OpenAIEmbeddings(api_key=api_key, model="text-embedding-ada-002")
+            imported = store.import_entries(entries)
+            if imported:
+                logger.info("Imported %s legacy diary entries from Chroma", imported)
+        except Exception:
+            logger.warning("Could not import legacy diary entries", exc_info=True)
+            self._initialized = False
 
-            persist_dir = os.path.join(
-                os.path.expanduser("~"), ".collig", "data", "diary"
+    def _legacy_chroma_entries(self) -> Optional[List[Dict[str, Any]]]:
+        persist_dir = os.path.dirname(_default_diary_path())
+        if not os.path.isdir(persist_dir):
+            return []
+        try:
+            import chromadb
+        except ImportError:
+            return None
+        try:
+            client = chromadb.PersistentClient(path=persist_dir)
+            collection = client.get_or_create_collection("user_diary")
+            data = collection.get(include=["documents", "metadatas"])
+        except Exception:
+            logger.warning("Could not read legacy diary Chroma collection", exc_info=True)
+            return None
+        entries = []
+        for doc, meta, entry_id in zip(
+            data.get("documents", []),
+            data.get("metadatas", []),
+            data.get("ids", []),
+        ):
+            text = str(doc or "").strip()
+            if not text:
+                continue
+            meta = meta or {}
+            timestamp = str(meta.get("timestamp") or datetime.datetime.now().isoformat())
+            entries.append(
+                {
+                    "id": str(entry_id) if entry_id else None,
+                    "content": text,
+                    "date": str(meta.get("date") or timestamp[:10]),
+                    "timestamp": timestamp,
+                }
             )
-            self.vectorstore = Chroma(
-                persist_directory=persist_dir,
-                embedding_function=self.embeddings,
-                collection_name="user_diary"
-            )
-            self._initialized = True
-        except Exception as e:
-            print(f"Failed to initialize diary storage: {e}")
+        return entries
 
     @property
     def name(self) -> str:
@@ -93,23 +165,13 @@ class DiarySkill(Skill):
                 content: The diary entry content
                 date: Optional date (YYYY-MM-DD), defaults to today
             """
-            if not self.vectorstore:
-                self._initialize_store()
-            if not self.vectorstore:
-                return "Error: Diary system not initialized."
-
             try:
-                if not date:
-                    date = datetime.datetime.now().strftime("%Y-%m-%d")
-
-                doc = Document(
-                    page_content=content,
-                    metadata={"date": date, "timestamp": datetime.datetime.now().isoformat()}
-                )
-                self.vectorstore.add_documents([doc])
-                return f"Diary entry saved for {date}: {content[:50]}..."
-            except Exception as e:
-                return f"Failed to save diary entry: {e}"
+                entry = self.store_entry(content, date=date)
+            except ValueError:
+                return "Failed to save diary entry: the entry is empty."
+            except Exception as exc:
+                return f"Failed to save diary entry: {exc}"
+            return f"Diary entry saved for {entry['date']}: {str(content)[:50]}..."
 
         @tool
         def read_diary_entry(date: str) -> str:
@@ -119,31 +181,14 @@ class DiarySkill(Skill):
             Args:
                 date: The date to read (YYYY-MM-DD)
             """
-            if not self.vectorstore:
-                self._initialize_store()
-            if not self.vectorstore:
-                return "Error: Diary system not initialized."
-
             try:
-                collection = self.vectorstore._collection
-                data = collection.get(
-                    where={"date": date},
-                    include=["documents", "metadatas"]
-                )
-                docs = data.get("documents", [])
-                metas = data.get("metadatas", [])
-
-                if not docs:
+                entries = self.list_entries(start_date=date, end_date=date)
+                if not entries:
                     return f"No diary entry found for {date}."
-
-                entries = []
-                for i, (doc, meta) in enumerate(zip(docs, metas), 1):
-                    ts = meta.get("timestamp", "")
-                    entries.append(f"[{ts}]\n{doc}")
-
-                return "\n\n---\n\n".join(entries)
-            except Exception as e:
-                return f"Failed to read diary entry: {e}"
+                blocks = [f"[{entry.get('timestamp', '')}]\n{entry.get('content', '')}" for entry in entries]
+                return "\n\n---\n\n".join(blocks)
+            except Exception as exc:
+                return f"Failed to read diary entry: {exc}"
 
         @tool
         def list_diary_entries(start_date: str = None, end_date: str = None) -> str:
@@ -154,47 +199,17 @@ class DiarySkill(Skill):
                 start_date: Start date (YYYY-MM-DD), defaults to beginning
                 end_date: End date (YYYY-MM-DD), defaults to today
             """
-            if not self.vectorstore:
-                self._initialize_store()
-            if not self.vectorstore:
-                return "Error: Diary system not initialized."
-
             try:
-                collection = self.vectorstore._collection
-                data = collection.get(include=["documents", "metadatas"])
-                docs = data.get("documents", [])
-                metas = data.get("metadatas", [])
-
-                if not docs:
+                entries = self.list_entries(start_date=start_date, end_date=end_date)
+                if not entries:
                     return "No diary entries found."
-
-                # Filter by date range if specified
-                results = []
-                for doc, meta in zip(docs, metas):
-                    entry_date = meta.get("date", "")
-                    if start_date and entry_date < start_date:
-                        continue
-                    if end_date and entry_date > end_date:
-                        continue
-
-                    results.append({
-                        "date": entry_date,
-                        "timestamp": meta.get("timestamp", ""),
-                        "content": doc[:200] + "..." if len(doc) > 200 else doc
-                    })
-
-                # Sort by date descending
-                results.sort(key=lambda x: x["date"], reverse=True)
-
-                if not results:
-                    return "No diary entries found in specified range."
-
                 output = []
-                for i, r in enumerate(results, 1):
-                    output.append(f"{i}. **{r['date']}** ({r['timestamp']})\n   {r['content']}")
-
+                for index, entry in enumerate(entries, 1):
+                    content = str(entry.get("content") or "")
+                    preview = content[:200] + "..." if len(content) > 200 else content
+                    output.append(f"{index}. **{entry.get('date', '')}** ({entry.get('timestamp', '')})\n   {preview}")
                 return "\n\n".join(output)
-            except Exception as e:
-                return f"Failed to list diary entries: {e}"
+            except Exception as exc:
+                return f"Failed to list diary entries: {exc}"
 
         return [write_diary_entry, read_diary_entry, list_diary_entries]

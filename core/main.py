@@ -296,9 +296,21 @@ def _get_all_notes():
 
 def _get_all_diary_entries():
     skill = _get_diary_skill()
-    if not skill or not getattr(skill, "vectorstore", None):
+    if not skill:
         return []
     try:
+        if hasattr(skill, "list_entries"):
+            entries = skill.list_entries()
+            return [
+                {
+                    "id": item.get("id"),
+                    "content": item.get("content", ""),
+                    "date": item.get("date", ""),
+                    "timestamp": item.get("timestamp", ""),
+                }
+                for item in entries
+            ]
+        # Compatibility with an already-loaded older skill instance.
         collection = skill.vectorstore._collection
         data = collection.get(include=["documents", "metadatas"])
         docs = data.get("documents", [])
@@ -310,6 +322,7 @@ def _get_all_diary_entries():
                 {
                     "id": i,
                     "content": d,
+                    "date": m.get("date", ""),
                     "timestamp": m.get("timestamp", ""),
                 }
             )
@@ -1481,14 +1494,13 @@ def list_diary():
 @_app.post("/api/diary", status_code=201)
 def create_diary_entry(entry: _DiaryEntryCreate):
     skill = _get_diary_skill()
-    if not skill or not getattr(skill, "vectorstore", None):
-        raise HTTPException(status_code=503, detail="Diary system not initialized. Check OPENAI_API_KEY.")
+    if not skill:
+        raise HTTPException(status_code=503, detail="Diary system not initialized.")
     try:
-        from langchain_core.documents import Document
-
-        meta = {"timestamp": datetime.datetime.now().isoformat(), "type": "diary_entry"}
-        skill.vectorstore.add_documents([Document(page_content=entry.content, metadata=meta)])
-        return {"message": "Diary entry created"}
+        saved = skill.store_entry(entry.content)
+        return {"message": "Diary entry created", "entry": saved}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1496,11 +1508,15 @@ def create_diary_entry(entry: _DiaryEntryCreate):
 @_app.delete("/api/diary/{entry_id}")
 def delete_diary_entry(entry_id: str):
     skill = _get_diary_skill()
-    if not skill or not getattr(skill, "vectorstore", None):
+    if not skill:
         raise HTTPException(status_code=503, detail="Diary system not initialized.")
     try:
-        skill.vectorstore.delete(ids=[entry_id])
+        removed = skill.remove_entries([entry_id])
+        if not removed:
+            raise HTTPException(status_code=404, detail="Diary entry not found")
         return {"message": "Diary entry deleted"}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1508,17 +1524,19 @@ def delete_diary_entry(entry_id: str):
 @_app.put("/api/diary/{entry_id}")
 def update_diary_entry(entry_id: str, entry: _DiaryEntryUpdate):
     skill = _get_diary_skill()
-    if not skill or not getattr(skill, "vectorstore", None):
+    if not skill:
         raise HTTPException(status_code=503, detail="Diary system not initialized.")
     try:
-        existing = skill.vectorstore._collection.get(ids=[entry_id], include=["documents", "metadatas"])
-        if not existing.get("ids"):
+        existing = skill.get_entry(entry_id)
+        if existing is None:
             raise HTTPException(status_code=404, detail="Diary entry not found")
-        old_meta = existing["metadatas"][0]
-        new_content = entry.content if entry.content is not None else existing["documents"][0]
-        new_meta = {"timestamp": old_meta.get("timestamp", datetime.datetime.now().isoformat()), "type": "diary_entry"}
-        skill.vectorstore._collection.update(ids=[entry_id], documents=[new_content], metadatas=[new_meta])
-        return {"message": "Diary entry updated"}
+        new_content = entry.content if entry.content is not None else existing.get("content", "")
+        updated = skill.edit_entry(entry_id, new_content)
+        if updated is None:
+            raise HTTPException(status_code=404, detail="Diary entry not found")
+        return {"message": "Diary entry updated", "entry": updated}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:

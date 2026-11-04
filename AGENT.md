@@ -314,6 +314,12 @@ toggling, update both the provider and term.options.theme.
 - Runtime state lives under **`~/.collig/`**: `config.json`, `sessions/`,
   `data/` (per-skill vector stores), `configs/`, `storage/`, `memory/`,
   `personalities/`. See `core/paths.py`.
+- **Notes and diary are plain JSON first.** `skills/memory/store.py` and
+  `skills/diary/store.py` own `notes.json` / `diary.json`; saving must work
+  without an API key or embedding credits. The legacy Chroma collections are
+  imported once (diary reads stored documents directly via chromadb, without
+  constructing OpenAIEmbeddings). Do not reintroduce an embedding call on the
+  save path.
 - **User memory** (`core/user_memory.py`) is stored as
   `~/.collig/memory/profile.json` (facts, interests, habits, tool usage) plus
   the generated `USER.md` and an append-only `events.jsonl`. It is injected

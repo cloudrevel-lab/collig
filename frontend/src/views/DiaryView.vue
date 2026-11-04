@@ -83,6 +83,9 @@
         <v-card-title>{{ editItem ? 'Edit Entry' : 'Add Entry' }}</v-card-title>
         <v-divider />
         <v-card-text class="pt-4">
+          <v-alert v-if="saveError" type="error" variant="tonal" density="compact" class="mb-3">
+            {{ saveError }}
+          </v-alert>
           <v-textarea
             v-model="form.content"
             label="Diary entry content"
@@ -96,7 +99,9 @@
         <v-card-actions class="pa-3">
           <v-spacer />
           <v-btn text @click="dialog = false">Cancel</v-btn>
-          <v-btn color="secondary" :loading="saving" @click="saveEntry">{{ editItem ? 'Update' : 'Save' }}</v-btn>
+          <v-btn color="secondary" :loading="saving" :disabled="saving || !form.content.trim()" @click="saveEntry">
+            {{ editItem ? 'Update' : 'Save' }}
+          </v-btn>
         </v-card-actions>
       </v-card>
     </v-dialog>
@@ -137,6 +142,7 @@ const deleteDialog = ref(false)
 const editItem = ref(null)
 const deleteItem = ref(null)
 const form = ref({ content: '' })
+const saveError = ref('')
 
 const filteredEntries = computed(() => {
   let result = entries.value
@@ -194,12 +200,14 @@ async function loadEntries() {
 function openDialog(item) {
   editItem.value = item || null
   form.value = item ? { content: item.content } : { content: '' }
+  saveError.value = ''
   dialog.value = true
 }
 
 async function saveEntry() {
   if (!form.value.content.trim()) return
   saving.value = true
+  saveError.value = ''
   try {
     const method = editItem.value ? 'PUT' : 'POST'
     const url = editItem.value
@@ -211,10 +219,20 @@ async function saveEntry() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(form.value),
     })
-    if (!res.ok) throw new Error(await res.text())
+    if (!res.ok) {
+      let detail = await res.text()
+      try {
+        const parsed = JSON.parse(detail)
+        detail = parsed.detail || detail
+      } catch (_) {
+        // Keep the plain response body.
+      }
+      throw new Error(detail)
+    }
     dialog.value = false
     await loadEntries()
   } catch (e) {
+    saveError.value = e.message || String(e)
     console.error('Failed to save diary entry:', e)
   } finally {
     saving.value = false

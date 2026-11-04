@@ -115,6 +115,7 @@ test:
 	uv run python tests/test_news_autoopen.py
 	uv run python tests/test_user_memory.py
 	uv run python tests/test_notes_store.py
+	uv run python tests/test_diary_store.py
 	uv run python tests/test_personality.py
 	uv run python tests/test_tool_fallback.py
 	uv run python tests/test_web_terminal.py

@@ -24,7 +24,7 @@ Collig is a powerful, locally-running AI agent designed to act as your personal 
     - **Built-in Skills:** Filesystem management, Web browsing, Email (Gmail), Weather with multi-day forecasts, Flight search with live fares, Git operations, Bookmarks, Notes, Lunar Calendar, News search, and more.
     - **Extensible:** Supports **Markdown-based Skills** (`SKILL.md`) compatible with the [Open Agent Skills](https://github.com/vercel-labs/skills) standard.
 -   **🌦️ Weather Forecasts:** Multi-day weather support — ask about tomorrow, next week, or specific days.
--   **💾 Long-term Memory:** Durable facts live in a local, readable store; notes are kept in plain-text JSON (`~/.collig/data/memory_notes/notes.json`) and saved without needing an embedding provider. ChromaDB remains in use for semantic search over bookmarks and diary entries.
+-   **💾 Long-term Memory:** Durable facts live in a local, readable store; notes are kept in plain-text JSON (`~/.collig/data/memory_notes/notes.json`) and diary entries in `~/.collig/data/diary/diary.json`, so both save without an embedding provider or API credits. ChromaDB remains in use for semantic search over bookmarks, and old diary collections are imported once.
 -   **🌐 Web Admin Console:** A full Vue 3 + Vuetify web application with:
     - 💬 **Chat** — Full conversation UI with markdown rendering and token stats
     - 📊 **Dashboard** — Real-time statistics for bookmarks, notes, and chat sessions
