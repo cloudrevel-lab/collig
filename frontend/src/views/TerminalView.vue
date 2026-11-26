@@ -1,14 +1,15 @@
 <template>
   <div :class="['terminal-page', { 'terminal-page--standalone': standalone }]">
-    <v-row align="center" class="mb-3">
-      <v-col>
-        <h1 class="text-h5 mb-1">Terminal</h1>
-        <p class="text-body-2 text-medium-emphasis mb-0">
-          The real Collig CLI in a browser. Commands, colours, prompt_toolkit menus and
-          <code>!shell</code> all work inside an isolated container.
-        </p>
+    <v-row align="center" no-gutters class="terminal-header mb-2">
+      <v-col class="py-0">
+        <h1 class="text-h6 mb-0 d-inline-flex align-center">
+          Terminal
+          <span class="text-body-2 text-medium-emphasis ml-2 d-none d-md-inline">
+            real Collig CLI in a sandboxed container
+          </span>
+        </h1>
       </v-col>
-      <v-col cols="auto" class="d-flex align-center flex-wrap gap-2">
+      <v-col cols="auto" class="d-flex align-center flex-wrap gap-2 py-0">
         <v-chip size="small" :color="status.ready ? 'success' : 'warning'" variant="tonal">
           <v-icon size="small" start>{{ status.ready ? 'mdi-shield-check' : 'mdi-alert-outline' }}</v-icon>
           {{ status.ready ? 'Sandbox ready' : 'Not ready' }}
@@ -151,13 +152,22 @@
       </v-card>
     </v-theme-provider>
 
-    <div class="terminal-footnote">
-      <strong>Security model:</strong> each browser session runs the CLI in a fresh
-      Docker container with a read-only root, only its own <code>/workspace</code> and
-      <code>$HOME</code> mounted, no capabilities, and an internal-only network. The
-      provider API key is never inside the sandbox; a per-session relay and proxy
-      inject it on the host. <code>!ls /home</code> sees the container's own home,
-      not the server's users.
+    <div class="terminal-footnote-bar">
+      <v-btn
+        variant="text"
+        size="x-small"
+        :prepend-icon="showSecurity ? 'mdi-chevron-down' : 'mdi-chevron-right'"
+        @click="showSecurity = !showSecurity"
+      >
+        Security model
+      </v-btn>
+    </div>
+    <div v-if="showSecurity" class="terminal-footnote">
+      Each browser session runs the CLI in a fresh Docker container with a read-only
+      root, only its own <code>/workspace</code> and <code>$HOME</code> mounted, no
+      capabilities, and an internal-only network. The provider API key is never inside
+      the sandbox; a per-session relay and proxy inject it on the host.
+      <code>!ls /home</code> sees the container's own home, not the server's users.
     </div>
   </div>
 </template>
@@ -196,6 +206,7 @@ const error = ref('')
 const sessionId = ref('')
 const socketState = ref('idle')
 const requestedSessionId = ref(readRequestedSessionId())
+const showSecurity = ref(false)
 
 let term = null
 let fitAddon = null
@@ -481,27 +492,46 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+.terminal-page > * {
+  flex: 0 0 auto;
+}
+/* The header is a compact toolbar; alerts are compact too.  Together they must
+   never push the terminal out of the viewport. */
+.terminal-header {
+  flex: 0 0 auto;
+}
+.terminal-header .v-col {
+  min-height: 0;
+}
 .terminal-page {
   display: flex;
   flex-direction: column;
-  min-height: calc(100vh - 150px);
+  /* Fill the full height of the v-main content area so the terminal is
+     always full-screen.  The docked sidebar pushes the width instead, which
+     squeezes the terminal horizontally when it opens. */
+  height: 100%;
+  min-height: 0;
   width: 100%;
   max-width: 100%;
   min-width: 0;
   overflow: hidden;
 }
 .terminal-page--standalone {
-  min-height: calc(100vh - 112px);
-}
-.terminal-page--standalone .terminal-host {
-  height: calc(100vh - 260px);
-  max-height: calc(100vh - 260px);
+  height: 100vh;
+  min-height: 0;
 }
 .gap-2 {
   gap: 8px;
 }
 .gap-3 {
   gap: 12px;
+}
+.terminal-page > .v-theme-provider {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
 }
 .terminal-card {
   overflow: hidden;
@@ -510,6 +540,11 @@ onBeforeUnmount(() => {
   background: #0d1117;
   width: 100%;
   min-width: 0;
+  /* The terminal is the only growing element: it fills all vertical space
+     left by the compact header and the security footnote. */
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
 }
 @media (max-width: 760px) {
   .terminal-hint {
@@ -565,11 +600,11 @@ onBeforeUnmount(() => {
   opacity: 0.7;
 }
 .terminal-host {
-  flex: 1;
-  min-height: 460px;
+  flex: 1 1 auto;
+  min-height: 200px;
   min-width: 0;
-  height: calc(100vh - 310px);
-  max-height: calc(100vh - 310px);
+  height: auto; /* grows to fill the card */
+  max-height: none;
   overflow: hidden;
   padding: 8px 4px 8px 12px;
 }
@@ -577,9 +612,15 @@ onBeforeUnmount(() => {
   min-width: 320px;
   max-width: 460px;
 }
+.terminal-footnote-bar {
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: flex-start;
+  margin-top: 2px;
+}
 .terminal-footnote {
-  margin-top: 12px;
-  padding: 10px 14px;
+  flex: 0 0 auto;
+  padding: 8px 14px;
   border-left: 3px solid rgb(var(--v-theme-primary));
   background: rgba(var(--v-theme-primary), 0.06);
   font-size: 12px;

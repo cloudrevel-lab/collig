@@ -273,6 +273,13 @@ terminal session. TerminalManager copies only that host session JSON into the
 sandbox, builds the CLI with --session, and syncs just that session back on
 cleanup. Tests cover seeding, --session, invalid ids and sync-back.
 
+The terminal is full-screen: .terminal-page is height:100% of v-main, and the
+v-theme-provider wrapper plus .terminal-card are the flex-growing elements while
+the compact header and the collapsible security note stay flex:0 0 auto. Keep
+that chain intact when editing the layout, otherwise the card collapses to its
+content height. The docked v-navigation-drawer squeezes the width (v-main) and
+the existing ResizeObserver re-fits xterm; do not add a fixed height back.
+
 The terminal has its own Vuetify theme names (colligTerminalDark/Light) supplied
 through v-theme-provider around the card. Default is dark and the choice is
 stored under collig-terminal-color, independent of the console-wide theme. When

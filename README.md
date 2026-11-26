@@ -146,9 +146,13 @@ The first start can take a few minutes because the image installs Collig's Pytho
 dependencies. Later starts use the cached image. Every browser connection gets a
 fresh session and is deleted when it closes.
 
-The terminal title bar has a sun/moon control for the terminal's own dark/light
-theme (dark by default, remembered in `localStorage`). When the terminal was
-opened from a session row, it also shows which web-chat session is being resumed.
+The terminal is full-screen by default: it fills the whole content area and
+re-fits automatically. The sidebar is docked, so opening it squeezes the terminal
+horizontally instead of overlapping it. The title bar has a sun/moon control for
+the terminal's own dark/light theme (dark by default, remembered in
+`localStorage`). When the terminal was opened from a session row, it also shows
+which web-chat session is being resumed. The security note is collapsed behind a
+"Security model" toggle so it does not take up screen space.
 
 #### Why a shell in the browser is safe here
 
