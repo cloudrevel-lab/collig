@@ -195,6 +195,43 @@ class PersonaMarketTests(unittest.TestCase):
             self.assertIn("1. Market Test", text)
             self.assertIn("/load-personas <number|name>", text)
 
+    def test_base_url_override_replaces_github_prefix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            _entry, urls = _fixture(tmp)
+            market = PersonaMarket(
+                repo=REPO,
+                ref=REF,
+                root=tmp / "personalities",
+                cache_path=tmp / "cache" / "index.json",
+                fetch=lambda url: urls[url.replace("http://relay:8080/market", BASE)],
+                manager=FakeManager(),
+                base_url="http://relay:8080/market",
+            )
+            self.assertEqual(market.index_url, "http://relay:8080/market/index.json")
+            self.assertEqual(
+                market.raw_url("personas/market-test/meta.json"),
+                "http://relay:8080/market/personas/market-test/meta.json",
+            )
+            self.assertEqual(market.catalog()["personas"][0]["slug"], "market-test")
+            self.assertTrue(market.install("market-test")["ok"])
+
+    def test_error_mentions_proxy_when_base_url_set(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            market = PersonaMarket(
+                repo=REPO,
+                ref=REF,
+                root=tmp / "personalities",
+                cache_path=tmp / "cache" / "index.json",
+                fetch=lambda url: (_ for _ in ()).throw(RuntimeError("boom")),
+                manager=FakeManager(),
+                base_url="http://relay:8080/market",
+            )
+            with self.assertRaises(MarketError) as caught:
+                market.catalog()
+            self.assertIn("relay:8080", str(caught.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

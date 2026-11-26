@@ -97,6 +97,19 @@ def _validate_catalog(payload: Any) -> Dict[str, Any]:
     return payload
 
 
+def _configured_base_url() -> str:
+    """Resolve the market proxy base URL from env or config.json."""
+    value = (os.environ.get("COLLIG_PERSONAS_BASE_URL") or "").strip()
+    if value:
+        return value
+    try:
+        from core.runtime import load_config
+
+        return str(load_config().get("COLLIG_PERSONAS_BASE_URL") or "").strip()
+    except Exception:
+        return ""
+
+
 class PersonaMarket:
     def __init__(
         self,
@@ -108,9 +121,15 @@ class PersonaMarket:
         fetch: Optional[Callable[[str], bytes]] = None,
         timeout: int = 15,
         manager: Any = None,
+        base_url: Optional[str] = None,
     ):
         self.repo = (repo or DEFAULT_REPO).strip()
         self.ref = (ref or DEFAULT_REF).strip()
+        # A sandboxed terminal has no direct Internet route, so the host proxies
+        # the market.  COLLIG_PERSONAS_BASE_URL points the client at that proxy
+        # (for example http://relay:8080/market) and replaces the GitHub raw
+        # prefix entirely.  It may come from the environment or from config.json.
+        self.base_url = (base_url if base_url is not None else _configured_base_url()).strip()
         if root is None:
             from core.paths import paths
 
@@ -131,11 +150,17 @@ class PersonaMarket:
     # fetching / cache
     # ------------------------------------------------------------------
     @property
+    def _raw_prefix(self) -> str:
+        if self.base_url:
+            return self.base_url.rstrip("/")
+        return f"https://raw.githubusercontent.com/{self.repo}/{self.ref}"
+
+    @property
     def index_url(self) -> str:
-        return f"https://raw.githubusercontent.com/{self.repo}/{self.ref}/index.json"
+        return self._raw_prefix + "/index.json"
 
     def raw_url(self, relative: str) -> str:
-        return f"https://raw.githubusercontent.com/{self.repo}/{self.ref}/" + relative.lstrip("/")
+        return self._raw_prefix + "/" + relative.lstrip("/")
 
     def _http_fetch(self, url: str) -> bytes:
         try:
@@ -148,7 +173,8 @@ class PersonaMarket:
             headers={"User-Agent": "collig-persona-market/1.0"},
         )
         if response.status_code != 200:
-            raise MarketError(f"GitHub returned HTTP {response.status_code} for {url}")
+            source = "the persona proxy" if self.base_url else "GitHub"
+            raise MarketError(f"{source} returned HTTP {response.status_code} for {url}")
         if len(response.content) > MAX_TOTAL:
             raise MarketError("market response is too large")
         return response.content

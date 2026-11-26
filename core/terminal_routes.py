@@ -19,7 +19,14 @@ import json as _json
 import threading
 import time
 
-from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import (
+    APIRouter,
+    HTTPException,
+    Request,
+    Response,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -351,3 +358,68 @@ async def terminal_llm_proxy(proxy_token: str, path: str, request: Request):
         headers=response_headers,
         media_type=upstream.headers.get("content-type"),
     )
+
+
+# ---------------------------------------------------------------------------
+# Persona-market proxy
+# ---------------------------------------------------------------------------
+#
+# A sandboxed terminal has no Internet route (that is the point of the
+# --internal network), so it cannot reach raw.githubusercontent.com directly.
+# The host fetches the market on the sandbox's behalf and serves the catalogue
+# and the individual persona files.  The relay forwards a fixed /market prefix
+# here, exactly like the LLM proxy, so this cannot be used to fetch an
+# arbitrary URL.
+
+
+def _market_session(proxy_token: str):
+    mgr = get_terminal_manager()
+    session = mgr.find_by_proxy_token(proxy_token)
+    if session is None:
+        raise HTTPException(status_code=404, detail="terminal session not found")
+    if not mgr.allow_proxy_request(session):
+        raise HTTPException(status_code=429, detail="terminal market rate limit exceeded")
+    return session
+
+
+@router.get("/api/terminal/market/{proxy_token}/index.json")
+def terminal_market_index(proxy_token: str):
+    """Return the persona catalogue for a sandboxed terminal."""
+    _market_session(proxy_token)
+    try:
+        from core.persona_market import get_persona_market
+
+        catalog = get_persona_market().catalog(refresh=True)
+        return {"schema": 1, "personas": catalog.get("personas") or []}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"market fetch failed: {exc}")
+
+
+@router.get("/api/terminal/market/{proxy_token}/personas/{slug}/{filename}")
+def terminal_market_file(proxy_token: str, slug: str, filename: str):
+    """Return one persona file (PERSONALITY.md, meta.json or sources.md)."""
+    _market_session(proxy_token)
+    if filename not in {"PERSONALITY.md", "meta.json", "sources.md"}:
+        raise HTTPException(status_code=404, detail="not found")
+    import httpx
+
+    try:
+        from core.persona_market import get_persona_market
+
+        url = get_persona_market().raw_url("personas/" + slug + "/" + filename)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"market fetch failed: {exc}")
+
+    try:
+        response = httpx.get(
+            url,
+            timeout=httpx.Timeout(120.0, connect=20.0),
+            follow_redirects=False,
+            headers={"User-Agent": "collig-persona-market/1.0"},
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"market fetch failed: {exc}")
+    if response.status_code != 200:
+        raise HTTPException(status_code=response.status_code, detail="market file not found")
+    media = "text/markdown" if filename.endswith(".md") else "application/json"
+    return Response(content=response.content, media_type=media)

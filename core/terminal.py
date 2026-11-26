@@ -759,8 +759,10 @@ class TerminalManager:
             base_url = (
                 "http://127.0.0.1:" + str(session.proxy_port) + "/api/terminal/llm/" + session.proxy_token + "/v1"
             )
+            market_url = "http://127.0.0.1:" + str(session.proxy_port) + "/api/terminal/market/" + session.proxy_token
         else:
             base_url = "http://relay:" + str(self.settings.relay_port) + "/v1"
+            market_url = "http://relay:" + str(self.settings.relay_port) + "/market"
         config = {
             "LLM_PROVIDER": "custom",
             "provider": "custom",
@@ -771,6 +773,9 @@ class TerminalManager:
             "USER_MEMORY_ENABLED": False,
             "USER_MEMORY_LLM_EXTRACT": False,
             "COLLIG_WEB_TERMINAL": True,
+            # The sandbox has no Internet route, so /load-personas fetches
+            # through the host proxy instead of raw.githubusercontent.com.
+            "COLLIG_PERSONAS_BASE_URL": market_url,
         }
         config_dir = session.home / ".collig"
         config_dir.mkdir(parents=True, exist_ok=True)

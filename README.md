@@ -463,6 +463,15 @@ to `~/.collig/personalities/<slug>/`. Market content is data only — nothing
 from the repository is executed. The catalogue is a numbered list so it behaves
 like an Emacs-style package list: list first, then install by number or name.
 
+**Inside the browser terminal, the host fetches the market for you.** The
+sandbox has no Internet route by design, so it cannot resolve
+`raw.githubusercontent.com`. The sandbox config points the client at
+`COLLIG_PERSONAS_BASE_URL` (the relay's `/market` prefix); the relay forwards
+only `index.json` and `personas/<slug>/{PERSONALITY.md,meta.json,sources.md}` to
+the host, which performs the real GitHub fetch. If you still see a
+"Failed to resolve 'raw.githubusercontent.com'" error in the terminal, the
+sandbox image is stale — rebuild it with `make terminal-image`.
+
 #### Publishing a persona
 
 From a Collig checkout:

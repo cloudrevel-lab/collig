@@ -16,10 +16,11 @@ still validates the per-session token and injects the provider credential.
 from __future__ import annotations
 
 import os
+import re
 
 import httpx
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 ALLOWED_PATHS = {
@@ -29,7 +30,15 @@ ALLOWED_PATHS = {
     "models",
 }
 
+# The LLM target ends in .../api/terminal/llm/<session-token>; the market
+# lives next to it at .../api/terminal/market/<session-token>.  Deriving it
+# keeps one token in the environment instead of two.
 TARGET = (os.environ.get("COLLIG_TERMINAL_RELAY_TARGET") or "").rstrip("/")
+MARKET_TARGET = TARGET.replace("/api/terminal/llm/", "/api/terminal/market/")
+# The persona market is fetched by the host, which has an Internet route; the
+# sandbox only sees this relay.  Only these two path shapes are forwarded.
+MARKET_INDEX = "index.json"
+MARKET_FILE_RE = re.compile(r"^personas/[^/]+/(PERSONALITY\.md|meta\.json|sources\.md)$")
 app = FastAPI(title="Collig terminal relay", docs_url=None, redoc_url=None, openapi_url=None)
 
 
@@ -100,6 +109,46 @@ async def relay(path: str, request: Request):
         status_code=upstream.status_code,
         headers=response_headers,
         media_type=upstream.headers.get("content-type"),
+    )
+
+
+def _market_path_allowed(path: str) -> bool:
+    cleaned = path.strip("/")
+    if cleaned == MARKET_INDEX:
+        return True
+    return bool(MARKET_FILE_RE.match(cleaned))
+
+
+@app.get("/market/{path:path}")
+async def market(path: str):
+    """Forward the persona market (catalogue + files) to the host proxy.
+
+    The host fetches raw.githubusercontent.com; this sidecar never talks to
+    GitHub itself, so it stays a fixed allow-list rather than an open proxy.
+    """
+    if not MARKET_TARGET:
+        return JSONResponse({"error": "relay target is not configured"}, status_code=500)
+    if not _market_path_allowed(path):
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    upstream_url = MARKET_TARGET + "/" + path.strip("/")
+    client = httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=15.0), follow_redirects=False)
+    try:
+        upstream = await client.get(upstream_url, headers={"accept-encoding": "identity"})
+    except Exception as exc:
+        await client.aclose()
+        return JSONResponse({"error": "market upstream unavailable", "detail": str(exc)}, status_code=502)
+    content = await upstream.aread()
+    await upstream.aclose()
+    await client.aclose()
+    headers = {"x-collig-terminal-relay": "market"}
+    if "content-type" in upstream.headers:
+        headers["content-type"] = upstream.headers["content-type"]
+    return Response(
+        content=content,
+        status_code=upstream.status_code,
+        headers=headers,
+        media_type=upstream.headers.get("content-type", "application/json"),
     )
 
 

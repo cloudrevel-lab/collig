@@ -198,6 +198,17 @@ check("relay allows models", relay_module.allowed_path("models"))
 check("relay rejects traversal", not relay_module.allowed_path("../config"))
 check("relay rejects arbitrary host paths", not relay_module.allowed_path("../../api/config"))
 
+# The market prefix is a separate allow-list so the sandbox can fetch personas
+# through the host even though it has no Internet route of its own.
+check("relay allows the market index", relay_module._market_path_allowed("index.json"))
+check(
+    "relay allows a persona file",
+    relay_module._market_path_allowed("personas/鲁迅/PERSONALITY.md"),
+)
+check("relay rejects other market files", not relay_module._market_path_allowed("personas/x/run.sh"))
+check("relay rejects market traversal", not relay_module._market_path_allowed("../index.json"))
+check("relay rejects nested market paths", not relay_module._market_path_allowed("personas/a/b/meta.json"))
+
 # ---------------------------------------------------------------------------
 # Rate limiting
 # ---------------------------------------------------------------------------
